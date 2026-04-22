@@ -22,6 +22,7 @@ public class ExecutionContext {
     private final String tableName;
     private final Reader reader;
     private final SearchShardTask task;
+    private byte[] planBytes;
 
     /**
      * Constructs an execution context.
@@ -33,6 +34,16 @@ public class ExecutionContext {
         this.tableName = tableName;
         this.task = task;
         this.reader = reader;
+    }
+
+    /** Returns the serialized backend-native plan bytes (e.g., Substrait), or {@code null} if not set. */
+    public byte[] getPlanBytes() {
+        return planBytes;
+    }
+
+    /** Sets the serialized backend-native plan bytes to be picked up by the backend's engine during prepare. */
+    public void setPlanBytes(byte[] planBytes) {
+        this.planBytes = planBytes;
     }
 
     /** Returns the search shard task. */

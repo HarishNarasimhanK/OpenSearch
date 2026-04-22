@@ -34,9 +34,10 @@ dependencies {
   implementation "org.slf4j:slf4j-api:${versions.slf4j}"
   implementation "org.checkerframework:checker-qual:3.43.0"
 
-  // Jackson — required by Arrow's schema import (C Data Interface)
+  // Jackson — required by Arrow's schema import (C Data Interface).
+  // jackson-annotations is provided by the parent analytics-engine plugin classloader; compileOnly here to avoid jar hell.
   implementation "com.fasterxml.jackson.core:jackson-core:${versions.jackson}"
-  implementation "com.fasterxml.jackson.core:jackson-annotations:${versions.jackson_annotations}"
+  compileOnly "com.fasterxml.jackson.core:jackson-annotations:${versions.jackson_annotations}"
   implementation "com.fasterxml.jackson.core:jackson-databind:${versions.jackson_databind}"
 }
 
@@ -45,6 +46,19 @@ test {
   jvmArgs += ["--enable-native-access=ALL-UNNAMED"]
   systemProperty 'native.lib.path', project(':sandbox:libs:dataformat-native').ext.nativeLibPath.absolutePath
   dependsOn ':sandbox:libs:dataformat-native:buildRustLibrary'
+}
+
+// Bundle the unified native library into the plugin jar as a classpath resource
+// under /native/<platform>/, where NativeLibraryLoader looks it up at runtime.
+def nativeLibFile = project(':sandbox:libs:dataformat-native').ext.nativeLibPath
+def platformDir = (System.getProperty('os.name').toLowerCase().contains('mac') ? 'macos' :
+        (System.getProperty('os.name').toLowerCase().contains('win') ? 'windows' : 'linux')) + '-' +
+        (System.getProperty('os.arch').contains('aarch64') || System.getProperty('os.arch').contains('arm64') ? 'aarch64' : 'x86_64')
+processResources {
+    dependsOn ':sandbox:libs:dataformat-native:buildRustLibrary'
+    from(nativeLibFile) {
+        into "native/${platformDir}"
+    }
 }
 
 tasks.withType(JavaCompile).configureEach {

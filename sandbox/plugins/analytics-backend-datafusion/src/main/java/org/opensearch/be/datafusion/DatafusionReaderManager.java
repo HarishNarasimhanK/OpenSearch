@@ -37,6 +37,7 @@ public class DatafusionReaderManager implements EngineReaderManager<DatafusionRe
     private static final Logger logger = LogManager.getLogger(DatafusionReaderManager.class);
 
     private final Map<CatalogSnapshot, DatafusionReader> readers = new HashMap<>();
+    private DatafusionReader latestReader;
     private final DataFormat dataFormat;
     private final String directoryPath;
     private final DataFusionService dataFusionService;
@@ -64,7 +65,8 @@ public class DatafusionReaderManager implements EngineReaderManager<DatafusionRe
     @Override
     public void onDeleted(CatalogSnapshot catalogSnapshot) throws IOException {
         DatafusionReader removed = readers.remove(catalogSnapshot);
-        if (removed != null) {
+        // Only close if no other snapshot key references it and it's not the cached latestReader.
+        if (removed != null && removed != latestReader && readers.containsValue(removed) == false) {
             removed.close();
         }
     }
@@ -86,10 +88,18 @@ public class DatafusionReaderManager implements EngineReaderManager<DatafusionRe
 
     @Override
     public void afterRefresh(boolean didRefresh, CatalogSnapshot catalogSnapshot) throws IOException {
-        if (didRefresh == false) return;
         if (readers.containsKey(catalogSnapshot)) return;
+        if (didRefresh == false) {
+            // No new data; reuse the most recent reader (if any) for this snapshot so later
+            // acquireReader() calls — which pass the latest snapshot from the manager — can find it.
+            if (latestReader != null) {
+                readers.put(catalogSnapshot, latestReader);
+            }
+            return;
+        }
         DatafusionReader reader = new DatafusionReader(directoryPath, catalogSnapshot.getSearchableFiles(dataFormat.name()));
         readers.put(catalogSnapshot, reader);
+        latestReader = reader;
     }
 
     private Collection<String> toAbsolutePaths(Collection<String> fileNames) {

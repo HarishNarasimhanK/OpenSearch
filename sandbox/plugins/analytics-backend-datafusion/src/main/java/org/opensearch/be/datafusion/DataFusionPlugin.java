@@ -13,6 +13,7 @@ import org.apache.logging.log4j.Logger;
 import org.opensearch.analytics.spi.AnalyticsSearchBackendPlugin;
 import org.opensearch.analytics.spi.SearchExecEngineProvider;
 import org.opensearch.be.datafusion.cache.CacheSettings;
+import org.opensearch.be.datafusion.nativelib.NativeBridge;
 import org.opensearch.cluster.metadata.IndexNameExpressionResolver;
 import org.opensearch.cluster.service.ClusterService;
 import org.opensearch.common.settings.Setting;
@@ -25,6 +26,7 @@ import org.opensearch.index.engine.dataformat.DataFormat;
 import org.opensearch.index.engine.dataformat.FieldTypeCapabilities;
 import org.opensearch.index.engine.dataformat.ReaderManagerConfig;
 import org.opensearch.index.engine.exec.EngineReaderManager;
+import org.opensearch.index.engine.exec.IndexReaderProvider;
 import org.opensearch.plugins.Plugin;
 import org.opensearch.plugins.SearchBackEndPlugin;
 import org.opensearch.repositories.RepositoriesService;
@@ -67,7 +69,7 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
         Setting.Property.NodeScope
     );
 
-    private volatile DataFusionService dataFusionService;
+    private static volatile DataFusionService dataFusionService;
 
     /**
      * Creates the DataFusion plugin.
@@ -159,6 +161,26 @@ public class DataFusionPlugin extends Plugin implements SearchBackEndPlugin<Data
             engine.prepare(ctx);
             return engine;
         };
+    }
+
+    @Override
+    public byte[] compileSql(String sql, String tableName, IndexReaderProvider.Reader reader) {
+        DatafusionReader dfReader = null;
+        for (DataFormat format : getSupportedFormats()) {
+            dfReader = reader.getReader(format, DatafusionReader.class);
+            if (dfReader != null) {
+                break;
+            }
+        }
+        if (dfReader == null) {
+            throw new IllegalStateException("No DatafusionReader available in the acquired reader");
+        }
+        return NativeBridge.sqlToSubstrait(
+            dfReader.getReaderHandle().getPointer(),
+            tableName,
+            sql,
+            dataFusionService.getNativeRuntime().get()
+        );
     }
 
     @Override

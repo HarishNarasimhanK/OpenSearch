@@ -8,6 +8,8 @@
 
 package org.opensearch.analytics.spi;
 
+import org.opensearch.index.engine.exec.IndexReaderProvider;
+
 /**
  * SPI extension point for backend query engine plugins.
  *
@@ -56,6 +58,19 @@ public interface AnalyticsSearchBackendPlugin {
      */
     default FragmentConvertor getFragmentConvertor() {
         throw new UnsupportedOperationException("getFragmentConvertor not implemented for [" + name() + "]");
+    }
+
+    /**
+     * Compiles a SQL string into backend-native plan bytes (e.g., Substrait) using the given reader.
+     * Used by the minimal single-shard execution path to accept SQL directly without a pre-built plan.
+     *
+     * @param sql the SQL query
+     * @param tableName the target table/index name referenced in the SQL
+     * @param reader the acquired data-format aware reader
+     * @return serialized plan bytes
+     */
+    default byte[] compileSql(String sql, String tableName, IndexReaderProvider.Reader reader) {
+        throw new UnsupportedOperationException("compileSql not implemented for [" + name() + "]");
     }
 
     /**
