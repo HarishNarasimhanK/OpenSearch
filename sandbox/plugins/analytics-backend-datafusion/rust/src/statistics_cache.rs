@@ -304,6 +304,7 @@ impl CacheAccessor<Path, Arc<Statistics>> for CustomStatisticsCache {
         let result = self.inner_cache.get(k);
 
         if result.is_some() {
+            native_bridge_common::log_info!("[STATISTICS CACHE HIT] {}", k);
             if let Ok(mut hits) = self.hit_count.lock() { *hits += 1; }
             let key = k.to_string();
             let memory_size = if let Ok(tracker) = self.memory_tracker.lock() {
@@ -313,6 +314,7 @@ impl CacheAccessor<Path, Arc<Statistics>> for CustomStatisticsCache {
                 policy_guard.on_access(&key, memory_size);
             }
         } else {
+            native_bridge_common::log_info!("[STATISTICS CACHE MISS] {}", k);
             if let Ok(mut misses) = self.miss_count.lock() { *misses += 1; }
         }
 
@@ -320,6 +322,7 @@ impl CacheAccessor<Path, Arc<Statistics>> for CustomStatisticsCache {
     }
 
     fn get_with_extra(&self, k: &Path, _extra: &Self::Extra) -> Option<Arc<Statistics>> {
+        native_bridge_common::log_info!("[STATISTICS CACHE] get_with_extra called for: {}", k);
         self.get(k)
     }
 
@@ -340,6 +343,7 @@ impl CacheAccessor<Path, Arc<Statistics>> for CustomStatisticsCache {
         v: Arc<Statistics>,
         e: &Self::Extra,
     ) -> Option<Arc<Statistics>> {
+        native_bridge_common::log_info!("[STATISTICS CACHE] put_with_extra called for: {}", k);
         let key = k.to_string();
         let memory_size = v.memory_size();
 

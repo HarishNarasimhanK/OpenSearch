@@ -439,14 +439,22 @@ pub unsafe fn sql_to_substrait(
             .with_cache_manager(
                 CacheManagerConfig::default()
                     .with_list_files_cache(Some(list_file_cache))
+                    // CACHE ENABLED (default):
                     .with_file_metadata_cache(Some(
                         runtime.runtime_env.cache_manager.get_file_metadata_cache(),
                     ))
+                    // NOOP EXPERIMENT: To disable ALL metadata caching (including DataFusion's fallback),
+                    // comment out the 3 lines above and uncomment the line below.
+                    // Also do the same change in query_executor.rs execute_query().
+                    // Then rebuild: cargo clean -p opensearch-datafusion && cargo clean -p opensearch-native-lib && cargo build --release
+                    // .with_file_metadata_cache(Some(Arc::new(crate::cache::NoOpMetadataCache)))
                     .with_files_statistics_cache(
                         runtime.runtime_env.cache_manager.get_file_statistic_cache(),
                     ),
             )
             .build()?;
+
+        native_bridge_common::log_info!("[QUERY PATH] sql_to_substrait: caches wired into per-query RuntimeEnv");
 
         let state = SessionStateBuilder::new()
             .with_config(SessionConfig::new())
@@ -458,17 +466,41 @@ pub unsafe fn sql_to_substrait(
         let listing_options = ListingOptions::new(Arc::new(ParquetFormat::new()))
             .with_file_extension(".parquet")
             .with_collect_stat(true);
+        let t0 = std::time::Instant::now();
         let schema = listing_options.infer_schema(&ctx.state(), &table_path).await?;
+        native_bridge_common::log_info!("[QUERY TIMING] sql_to_substrait: infer_schema took {} µs", t0.elapsed().as_micros());
         let config = ListingTableConfig::new(table_path)
             .with_listing_options(listing_options)
             .with_schema(schema);
-        ctx.register_table(&table_name, Arc::new(ListingTable::try_new(config)?))?;
+        let t1 = std::time::Instant::now();
+        let listing_table = ListingTable::try_new(config)?;
 
+        // Wire the statistics cache from CustomCacheManager to ListingTable.
+        // Without this, ListingTable creates its own DefaultFileStatisticsCache
+        // that is NOT shared with the pre-warmed cache, so pre-warmed stats are never used.
+        let listing_table = if let Some(ref mgr) = runtime.custom_cache_manager {
+            if let Some(stats_cache) = mgr.get_statistics_cache() {
+                native_bridge_common::log_info!("[QUERY PATH] sql_to_substrait: wiring CustomStatisticsCache to ListingTable");
+                listing_table.with_cache(Some(stats_cache as Arc<dyn datafusion::execution::cache::cache_manager::FileStatisticsCache>))
+            } else {
+                listing_table
+            }
+        } else {
+            listing_table
+        };
+
+        ctx.register_table(&table_name, Arc::new(listing_table))?;
+        native_bridge_common::log_info!("[QUERY TIMING] sql_to_substrait: register_table took {} µs", t1.elapsed().as_micros());
+
+        let t2 = std::time::Instant::now();
         let plan = ctx.sql(sql).await?.logical_plan().clone();
+        native_bridge_common::log_info!("[QUERY TIMING] sql_to_substrait: SQL planning took {} µs", t2.elapsed().as_micros());
+        let t3 = std::time::Instant::now();
         let substrait = to_substrait_plan(&plan, &ctx.state())?;
         let mut buf = Vec::new();
         substrait.encode(&mut buf)
             .map_err(|e| DataFusionError::Execution(format!("Substrait encode failed: {}", e)))?;
+        native_bridge_common::log_info!("[QUERY TIMING] sql_to_substrait: substrait encode took {} µs", t3.elapsed().as_micros());
         Ok(buf)
     })
 }

@@ -1,0 +1,74 @@
+#V2
+\\?
+\\d
+CREATE EXTERNAL TABLE hits STORED AS PARQUET LOCATION '/Volumes/workplace/opensearch-cache-port/OpenSearch/build/testclusters/runTask-0/data/nodes/0/indices/DwercqVCSEuUCw5O-rJdtw/0/parquet/';
+\\d
+SELECT * FROM metadata_cache();
+SELECT * FROM statistics_cache();
+SELECT * FROM list_files_cache();
+SELECT COUNT(*) AS metadata_entries FROM metadata_cache();
+SELECT COUNT(*) AS stats_entries FROM statistics_cache();
+SELECT COUNT(*) AS files_entries FROM list_files_cache();
+SELECT COUNT(*) FROM hits WHERE "RegionID" > 100;
+DESCRIBE hits;
+SELECT * FROM hits LIMIT 1;
+\\d
+\\q
+CREATE EXTERNAL TABLE hits STORED AS PARQUET LOCATION '/Volumes/workplace/opensearch-cache-port/OpenSearch/build/testclusters/runTask-0/data/nodes/0/indices/fR1TagZFQbyqCxbyQFIrUA/0/parquet/';
+\\d
+SELECT * FROM hits LIMIT 1;
+SELECT COUNT(*) FROM hits WHERE "RegionID" > 100;
+SELECT COUNT(*) AS metadata_entries FROM metadata_cache();
+SELECT COUNT(*) AS stats_entries FROM statistics_cache();
+SELECT COUNT(*) AS files_entries FROM list_files_cache();
+SELECT "RegionID", COUNT(*), AVG("Age") FROM hits GROUP BY "RegionID" ORDER BY COUNT(*) DESC LIMIT 10;
+SELECT COUNT(*) AS stats_entries FROM statistics_cache();
+SELECT * FROM parquet_metadata('/Volumes/workplace/opensearch-cache-port/OpenSearch/build/testclusters/runTask-0/data/nodes/0/indices/fR1TagZFQbyqCxbyQFIrUA/0/parquet/') LIMIT 10;
+SELECT * FROM parquet_metadata(hits) LIMIT 10;
+SELECT * FROM parquet_metadata('hits') LIMIT 10;
+SELECT * FROM metadata_cache();
+SELECT * FROM statistics_cache();
+SHOW ALL;
+-- THIS IS CRITICAL — currently FALSE in your setup!\nSET datafusion.execution.parquet.pushdown_filters = true;
+-- Also enable this for optimal filter ordering\nSET datafusion.execution.parquet.reorder_filters = true;
+SHOW datafusion.execution.parquet.pushdown_filters;
+SHOW datafusion.execution.parquet.pruning;
+SHOW datafusion.runtime.metadata_cache_limit;
+SELECT * FROM statistics_cache();
+SELECT "RegionID", COUNT(*), AVG("Age") FROM hits GROUP BY "RegionID" ORDER BY COUNT(*) DESC LIMIT 10;
+SELECT * FROM statistics_cache();
+SELECT COUNT(*) FROM hits WHERE "RegionID" > 100;
+SELECT * FROM statistics_cache();
+\\q
+CREATE EXTERNAL TABLE hits STORED AS PARQUET LOCATION '/Volumes/workplace/opensearch-cache-port/OpenSearch/build/testclusters/runTask-0/data/nodes/0/indices/fR1TagZFQbyqCxbyQFIrUA/0/parquet/';
+SHOW datafusion.execution.parquet.pushdown_filters;
+SHOW datafusion.execution.parquet.pruning;
+SHOW datafusion.runtime.metadata_cache_limit;
+SET datafusion.execution.parquet.pushdown_filters = true;
+SET datafusion.execution.parquet.reorder_filters = true;
+SHOW datafusion.execution.parquet.pushdown_filters;
+SELECT COUNT(*) FROM hits WHERE "RegionID" > 100;
+SELECT * FROM statistics_cache();
+\\q
+CREATE EXTERNAL TABLE hits STORED AS PARQUET LOCATION '/Volumes/workplace/opensearch-cache-port/OpenSearch/build/testclusters/runTask-0/data/nodes/0/indices/fR1TagZFQbyqCxbyQFIrUA';
+SELECT COUNT(*) AS metadata_entries FROM metadata_cache();
+SELECT COUNT(*) AS stats_entries FROM statistics_cache();
+SELECT COUNT(*) AS files_entries FROM list_files_cache();
+SELECT MIN("CounterID"), MAX("CounterID") FROM hits;
+SELECT COUNT(*) FROM hits;
+CREATE EXTERNAL TABLE hits STORED AS PARQUET LOCATION '/Volumes/workplace/opensearch-cache-port/OpenSearch/build/testclusters/runTask-0/data/nodes/0/indices/fR1TagZFQbyqCxbyQFIrUA';
+DROP table hits;
+CREATE EXTERNAL TABLE hits STORED AS PARQUET LOCATION '/Volumes/workplace/opensearch-cache-port/OpenSearch/build/testclusters/runTask-0/data/nodes/0/indices/fR1TagZFQbyqCxbyQFIrUA';
+SELECT COUNT(*) FROM hits;
+CREATE EXTERNAL TABLE hits STORED AS PARQUET LOCATION '/Volumes/workplace/opensearch-cache-port/OpenSearch/build/testclusters/runTask-0/data/nodes/0/indices/fR1TagZFQbyqCxbyQFIrUA/0/parquet/';
+drop table hits;
+CREATE EXTERNAL TABLE hits STORED AS PARQUET LOCATION '/Volumes/workplace/opensearch-cache-port/OpenSearch/build/testclusters/runTask-0/data/nodes/0/indices/fR1TagZFQbyqCxbyQFIrUA/0/parquet/';
+SELECT COUNT(*) FROM hits;
+SELECT MIN("CounterID"), MAX("CounterID") FROM hits;
+SELECT * FROM metadata_cache();
+SELECT * FROM statistics_cache();
+SELECT * FROM list_files_cache();
+SELECT * FROM statistics_cache();
+SELECT * FROM metadata_cache();
+SELECT * FROM list_files_cache();
+\\q

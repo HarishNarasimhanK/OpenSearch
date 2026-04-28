@@ -112,7 +112,7 @@ public final class CacheUtils {
                     type.getEvictionType(clusterSettings)
                 );
             } else {
-                logger.debug("Cache type {} is disabled", type.getCacheTypeName());
+                logger.info("[CACHE INIT] Cache type {} is DISABLED by setting", type.getCacheTypeName());
             }
         }
         logger.info("Cache configuration completed");

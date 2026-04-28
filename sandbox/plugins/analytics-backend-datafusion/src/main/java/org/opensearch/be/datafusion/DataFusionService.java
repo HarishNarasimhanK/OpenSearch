@@ -68,13 +68,15 @@ public class DataFusionService extends AbstractLifecycleComponent {
 
     @Override
     protected void doStart() {
-        logger.debug("Starting DataFusion service");
+        logger.info("[CACHE INIT] Starting DataFusion service");
         NativeBridge.initTokioRuntimeManager(cpuThreads);
-        logger.debug("Tokio runtime manager initialized with {} CPU threads", cpuThreads);
 
         long cacheManagerPtr = 0L;
         if (clusterSettings != null) {
             cacheManagerPtr = CacheUtils.createCacheConfig(clusterSettings);
+            logger.info("[CACHE INIT] Cache manager created with ptr={}", cacheManagerPtr);
+        } else {
+            logger.info("[CACHE INIT] No cluster settings, cache disabled (cacheManagerPtr=0)");
         }
 
         long ptr = NativeBridge.createGlobalRuntime(memoryPoolLimit, cacheManagerPtr, spillDirectory, spillMemoryLimit);
@@ -155,7 +157,23 @@ public class DataFusionService extends AbstractLifecycleComponent {
     public void onFilesAdded(Collection<String> filePaths) {
         if (filePaths == null || filePaths.isEmpty()) return;
         try {
+            logger.info("[CACHE WIRING] DataFusionService.onFilesAdded called with {} files: {}", filePaths.size(), filePaths);
+            if (cacheManager == null) {
+                logger.info("[CACHE WIRING] No cache manager — skipping cache pre-warm");
+                return;
+            }
             NativeBridge.cacheManagerAddFiles(runtimeHandle.get(), filePaths.toArray(new String[0]));
+            logger.info("[CACHE WIRING] NativeBridge.cacheManagerAddFiles completed successfully");
+            // Log cache stats after pre-warming
+            long metadataMemory = cacheManager.getMemoryConsumed(CacheUtils.CacheType.METADATA);
+            long statsMemory = cacheManager.getMemoryConsumed(CacheUtils.CacheType.STATISTICS);
+            long totalMemory = cacheManager.getTotalMemoryConsumed();
+            logger.info("[CACHE STATS] After addFiles: metadata={} bytes, statistics={} bytes, total={} bytes", metadataMemory, statsMemory, totalMemory);
+            for (String fp : filePaths.toArray(new String[0])) {
+                boolean inMetadata = cacheManager.getEntryFromCacheType(CacheUtils.CacheType.METADATA, fp);
+                boolean inStats = cacheManager.getEntryFromCacheType(CacheUtils.CacheType.STATISTICS, fp);
+                logger.info("[CACHE STATS] File {}: metadata={}, statistics={}", fp, inMetadata, inStats);
+            }
         } catch (Exception e) {
             logger.warn("Failed to register new files with native cache", e);
         }

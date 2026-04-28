@@ -80,6 +80,7 @@ public class DatafusionReaderManager implements EngineReaderManager<DatafusionRe
     @Override
     public void onFilesAdded(Collection<String> files) throws IOException {
         if (files == null || files.isEmpty()) return;
+        logger.info("[CACHE WIRING] onFilesAdded called with {} files: {}", files.size(), files);
         dataFusionService.onFilesAdded(toAbsolutePaths(files));
     }
 
@@ -88,6 +89,9 @@ public class DatafusionReaderManager implements EngineReaderManager<DatafusionRe
 
     @Override
     public void afterRefresh(boolean didRefresh, CatalogSnapshot catalogSnapshot) throws IOException {
+        if (didRefresh) {
+            logger.info("[CACHE WIRING] afterRefresh called, didRefresh=true");
+        }
         if (readers.containsKey(catalogSnapshot)) return;
         if (didRefresh == false) {
             // No new data; reuse the most recent reader (if any) for this snapshot so later

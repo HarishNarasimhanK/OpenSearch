@@ -63,7 +63,15 @@ impl CacheAccessor<ObjectMeta, Arc<dyn datafusion::execution::cache::cache_manag
 
     fn get(&self, k: &ObjectMeta) -> Option<Arc<dyn datafusion::execution::cache::cache_manager::FileMetadata>> {
         match self.inner.lock() {
-            Ok(cache) => cache.get(k),
+            Ok(cache) => {
+                let result = cache.get(k);
+                if result.is_some() {
+                    native_bridge_common::log_info!("[METADATA CACHE HIT] {}", k.location);
+                } else {
+                    native_bridge_common::log_info!("[METADATA CACHE MISS] {}", k.location);
+                }
+                result
+            }
             Err(e) => { log_cache_error("get", &e.to_string()); None }
         }
     }
@@ -145,5 +153,32 @@ impl FileMetadataCache for MutexFileMetadataCache {
             Ok(cache) => cache.list_entries(),
             Err(e) => { log_cache_error("list_entries", &e.to_string()); std::collections::HashMap::new() }
         }
+    }
+}
+
+
+
+/// A no-op metadata cache that never caches anything.
+/// Used for experiments to measure performance without any metadata caching.
+pub struct NoOpMetadataCache;
+
+impl CacheAccessor<ObjectMeta, Arc<dyn datafusion::execution::cache::cache_manager::FileMetadata>> for NoOpMetadataCache {
+    type Extra = ObjectMeta;
+    fn get(&self, _k: &ObjectMeta) -> Option<Arc<dyn datafusion::execution::cache::cache_manager::FileMetadata>> { None }
+    fn get_with_extra(&self, _k: &ObjectMeta, _extra: &Self::Extra) -> Option<Arc<dyn datafusion::execution::cache::cache_manager::FileMetadata>> { None }
+    fn put(&self, _k: &ObjectMeta, _v: Arc<dyn datafusion::execution::cache::cache_manager::FileMetadata>) -> Option<Arc<dyn datafusion::execution::cache::cache_manager::FileMetadata>> { None }
+    fn put_with_extra(&self, _k: &ObjectMeta, _v: Arc<dyn datafusion::execution::cache::cache_manager::FileMetadata>, _e: &Self::Extra) -> Option<Arc<dyn datafusion::execution::cache::cache_manager::FileMetadata>> { None }
+    fn remove(&self, _k: &ObjectMeta) -> Option<Arc<dyn datafusion::execution::cache::cache_manager::FileMetadata>> { None }
+    fn contains_key(&self, _k: &ObjectMeta) -> bool { false }
+    fn len(&self) -> usize { 0 }
+    fn clear(&self) {}
+    fn name(&self) -> String { "NoOpMetadataCache".to_string() }
+}
+
+impl FileMetadataCache for NoOpMetadataCache {
+    fn cache_limit(&self) -> usize { 0 }
+    fn update_cache_limit(&self, _limit: usize) {}
+    fn list_entries(&self) -> std::collections::HashMap<object_store::path::Path, datafusion::execution::cache::cache_manager::FileMetadataCacheEntry> {
+        std::collections::HashMap::new()
     }
 }

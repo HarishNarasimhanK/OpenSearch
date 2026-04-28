@@ -210,11 +210,13 @@ pub unsafe extern "C" fn df_create_cache(
 
     match cache_type {
         cache::CACHE_TYPE_METADATA => {
+            native_bridge_common::log_info!("[CACHE CREATE] Creating METADATA cache with size_limit={} bytes", size_limit);
             let inner_cache = DefaultFilesMetadataCache::new(size_limit as usize);
             let metadata_cache = Arc::new(cache::MutexFileMetadataCache::new(inner_cache));
             manager.set_file_metadata_cache(metadata_cache);
         }
         cache::CACHE_TYPE_STATS => {
+            native_bridge_common::log_info!("[CACHE CREATE] Creating STATISTICS cache with size_limit={} bytes", size_limit);
             let stats_cache = Arc::new(CustomStatisticsCache::new(
                 PolicyType::Lru,
                 size_limit as usize,

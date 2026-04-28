@@ -18,7 +18,7 @@ use datafusion::{
     prelude::*,
 };
 use datafusion::datasource::file_format::parquet::ParquetFormat;
-use datafusion::execution::cache::cache_manager::CacheManagerConfig;
+use datafusion::execution::cache::cache_manager::{CacheManagerConfig, FileStatisticsCache};
 use datafusion::execution::cache::{CacheAccessor, DefaultListFilesCache};
 use datafusion_substrait::logical_plan::consumer::from_substrait_plan;
 use log::error;
@@ -59,9 +59,15 @@ pub async fn execute_query(
         .with_cache_manager(
             CacheManagerConfig::default()
                 .with_list_files_cache(Some(list_file_cache))
+                // CACHE ENABLED (default):
                 .with_file_metadata_cache(Some(
                     runtime.runtime_env.cache_manager.get_file_metadata_cache(),
                 ))
+                // NOOP EXPERIMENT: To disable ALL metadata caching (including DataFusion's fallback),
+                // comment out the 3 lines above and uncomment the line below.
+                // Also do the same change in api.rs sql_to_substrait().
+                // Then rebuild: cargo clean -p opensearch-datafusion && cargo clean -p opensearch-native-lib && cargo build --release
+                // .with_file_metadata_cache(Some(Arc::new(crate::cache::NoOpMetadataCache)))
                 .with_files_statistics_cache(
                     runtime.runtime_env.cache_manager.get_file_statistic_cache(),
                 ),
@@ -100,6 +106,7 @@ pub async fn execute_query(
         .with_file_extension(".parquet")
         .with_collect_stat(true);
 
+    let t0 = std::time::Instant::now();
     let resolved_schema = listing_options
         .infer_schema(&ctx.state(), &table_path)
         .await
@@ -107,15 +114,32 @@ pub async fn execute_query(
             error!("Failed to infer schema: {}", e);
             e
         })?;
+    native_bridge_common::log_info!("[QUERY TIMING] execute_query: infer_schema took {} µs", t0.elapsed().as_micros());
 
     let table_config = ListingTableConfig::new(table_path)
         .with_listing_options(listing_options)
         .with_schema(resolved_schema);
 
-    let provider = Arc::new(ListingTable::try_new(table_config).map_err(|e| {
+    let listing_table = ListingTable::try_new(table_config).map_err(|e| {
         error!("Failed to create listing table: {}", e);
         e
-    })?);
+    })?;
+
+    // Wire the statistics cache from CustomCacheManager to ListingTable.
+    // Without this, ListingTable creates its own DefaultFileStatisticsCache
+    // that is NOT shared with the pre-warmed cache, so pre-warmed stats are never used.
+    let listing_table = if let Some(ref mgr) = runtime.custom_cache_manager {
+        if let Some(stats_cache) = mgr.get_statistics_cache() {
+            native_bridge_common::log_info!("[QUERY PATH] execute_query: wiring CustomStatisticsCache to ListingTable");
+            listing_table.with_cache(Some(stats_cache as Arc<dyn FileStatisticsCache>))
+        } else {
+            listing_table
+        }
+    } else {
+        listing_table
+    };
+
+    let provider = Arc::new(listing_table);
 
     ctx.register_table(&table_name, provider).map_err(|e| {
         error!("Failed to register table: {}", e);
@@ -127,9 +151,11 @@ pub async fn execute_query(
         DataFusionError::Execution(format!("Failed to decode Substrait: {}", e))
     })?;
 
+    let t1 = std::time::Instant::now();
     let logical_plan = from_substrait_plan(&ctx.state(), &substrait_plan).await?;
     let dataframe = ctx.execute_logical_plan(logical_plan).await?;
     let physical_plan = dataframe.create_physical_plan().await?;
+    native_bridge_common::log_info!("[QUERY TIMING] execute_query: logical→physical plan took {} µs", t1.elapsed().as_micros());
 
     let df_stream = execute_stream(physical_plan, ctx.task_ctx()).map_err(|e| {
         error!("Failed to create execution stream: {}", e);

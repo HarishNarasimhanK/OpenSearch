@@ -64,13 +64,13 @@ impl CustomCacheManager {
     /// Set the file metadata cache
     pub fn set_file_metadata_cache(&mut self, cache: Arc<MutexFileMetadataCache>) {
         self.file_metadata_cache = Some(cache);
-        debug!("[CACHE INFO] File metadata cache set in CustomCacheManager");
+        native_bridge_common::log_info!("[CACHE CREATE] File metadata cache set in CustomCacheManager");
     }
 
     /// Set the statistics cache
     pub fn set_statistics_cache(&mut self, cache: Arc<CustomStatisticsCache>) {
         self.statistics_cache = Some(cache);
-        debug!("[CACHE INFO] Statistics cache set in CustomCacheManager");
+        native_bridge_common::log_info!("[CACHE CREATE] Statistics cache set in CustomCacheManager");
     }
 
     /// Get the statistics cache
@@ -107,6 +107,7 @@ impl CustomCacheManager {
 
     /// Add multiple files to all applicable caches
     pub fn add_files(&self, file_paths: &[String]) -> Result<Vec<(String, bool)>, String> {
+        native_bridge_common::log_info!("[CACHE PRE-WARM] add_files called with {} files: {:?}", file_paths.len(), file_paths);
         let mut results = Vec::new();
 
         for file_path in file_paths {
