@@ -72,9 +72,11 @@ impl CacheAccessor<Path, CachedFileMetadataEntry> for MutexFileMetadataCache {
                         .take(3)
                         .collect::<Vec<_>>()
                         .join(" | ");
-                    native_bridge_common::log_info!("[METADATA CACHE HIT] {} caller={}", k, caller);
+                    let _ = caller; // suppress unused warning while logs are commented out
+                    // Per-file HIT/MISS logs disabled for clean perf benchmarks. Uncomment to debug.
+                    // native_bridge_common::log_info!("[METADATA CACHE HIT] {} caller={}", k, caller);
                 } else {
-                    native_bridge_common::log_info!("[METADATA CACHE MISS] {}", k);
+                    // native_bridge_common::log_info!("[METADATA CACHE MISS] {}", k);
                 }
                 result
             }

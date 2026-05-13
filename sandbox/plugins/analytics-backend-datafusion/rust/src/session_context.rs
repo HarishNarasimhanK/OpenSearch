@@ -140,13 +140,26 @@ pub async unsafe fn create_session_context(
         .with_listing_options(listing_options)
         .with_schema(resolved_schema);
 
-    let provider = Arc::new(ListingTable::try_new(table_config).map_err(|e| {
-        error!(
-            "create_session_context: failed to create listing table: {}",
-            e
-        );
-        e
-    })?);
+    // Wire the global statistics cache into the ListingTable so that
+    // do_collect_statistics_and_ordering() reads from our CustomStatisticsCache
+    // instead of a fresh DefaultFileStatisticsCache. Without this, the statistics
+    // cache configured on the RuntimeEnv is never consulted by ListingTable.
+    let stats_cache = runtime.runtime_env.cache_manager.get_file_statistic_cache();
+    native_bridge_common::log_info!(
+        "[VANILLA PATH] create_session_context: wiring statistics cache into ListingTable (cache_present={})",
+        stats_cache.is_some()
+    );
+    let provider = Arc::new(
+        ListingTable::try_new(table_config)
+            .map_err(|e| {
+                error!(
+                    "create_session_context: failed to create listing table: {}",
+                    e
+                );
+                e
+            })?
+            .with_cache(stats_cache),
+    );
 
     ctx.register_table(table_name, provider).map_err(|e| {
         error!(
