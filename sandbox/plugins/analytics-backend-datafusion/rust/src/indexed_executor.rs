@@ -94,6 +94,7 @@ pub async fn execute_indexed_query(
     query_memory_pool: Option<Arc<dyn MemoryPool>>,
     query_config: Arc<DatafusionQueryConfig>,
 ) -> Result<i64, DataFusionError> {
+    native_bridge_common::log_info!("[EIQ] execute_indexed_query function");
     let num_partitions = query_config.target_partitions.max(1);
     // Share caches with the global runtime (same as vanilla path): list-files
     // pre-populated with the reader's object_metas, file-metadata and
@@ -406,6 +407,7 @@ pub async unsafe fn execute_indexed_with_context(
     cpu_executor: DedicatedExecutor,
 ) -> Result<i64, DataFusionError> {
     let handle = *Box::from_raw(session_ctx_ptr as *mut crate::session_context::SessionContextHandle);
+    native_bridge_common::log_info!("[INDEXED PATH] execute_indexed_with_context called");
     let classification_override = handle.indexed_config.map(|config| {
         match (config.tree_shape, config.delegated_predicate_count) {
             (1, 1) => FilterClass::SingleCollector,
@@ -422,6 +424,15 @@ pub async unsafe fn execute_indexed_with_context(
     let object_metas = handle.object_metas;
     let query_context = handle.query_context;
 
+    // Validate cache wiring
+    let state = ctx.state();
+    let runtime_env = state.runtime_env();
+    let metadata_cache = runtime_env.cache_manager.get_file_metadata_cache();
+    let metadata_cache_entries = metadata_cache.len();
+    let metadata_cache_limit = metadata_cache.cache_limit();
+    let stats_cache_entries = runtime_env.cache_manager.get_file_statistic_cache().map(|c| c.len()).unwrap_or(0);
+    native_bridge_common::log_info!("[INDEXED PATH CACHE WIRING] table={}, metadata_cache_entries={}, metadata_cache_limit_bytes={}, statistics_cache_entries={}", table_name, metadata_cache_entries, metadata_cache_limit, stats_cache_entries);
+
     // SessionContext already has RuntimeEnv, caches, memory pool, UDF from create_session_context_indexed.
     // Deregister the default ListingTable (registered by create_session_context) — will be replaced
     // with IndexedTableProvider after plan decoding.
@@ -433,6 +444,7 @@ pub async unsafe fn execute_indexed_with_context(
     let (segments, schema) = build_segments(&state, Arc::clone(&store), object_metas.as_ref())
         .await
         .map_err(DataFusionError::Execution)?;
+    native_bridge_common::log_info!("[INDEXED PATH] build_segments completed: {} segments", segments.len());
     for (i, seg) in segments.iter().enumerate() {
     }
 
@@ -462,6 +474,7 @@ pub async unsafe fn execute_indexed_with_context(
             Some(e) => classify_filter(&e.tree),
         },
     };
+    native_bridge_common::log_info!("[INDEXED PATH] filter classification: {:?}", classification);
 
     // Derive the parquet pushdown predicate from the BoolNode tree.
     // `scan()` ignores DataFusion's filters argument (which contains
@@ -685,6 +698,7 @@ pub async unsafe fn execute_indexed_with_context(
     let logical_plan = from_substrait_plan(&ctx.state(), &plan).await?;
     let dataframe = ctx.execute_logical_plan(logical_plan).await?;
     let physical_plan = dataframe.create_physical_plan().await?;
+    native_bridge_common::log_info!("[INDEXED PATH] physical plan created, executing stream");
     let df_stream = execute_stream(physical_plan, ctx.task_ctx())
         .map_err(|e| DataFusionError::Execution(format!("execute_stream: {}", e)))?;
 

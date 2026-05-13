@@ -95,6 +95,7 @@ pub async unsafe fn create_session_context(
         );
 
     if let Some(pool) = query_memory_pool {
+    native_bridge_common::log_info!("[INDEXED PATH] create_session_context: caches wired (metadata + statistics from global runtime)");
         runtime_env_builder = runtime_env_builder.with_memory_pool(pool);
     }
 

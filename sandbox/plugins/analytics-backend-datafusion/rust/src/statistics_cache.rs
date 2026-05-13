@@ -319,6 +319,7 @@ impl CacheAccessor<Path, CachedFileMetadata> for CustomStatisticsCache {
         let result = self.inner_cache.get(k);
 
         if result.is_some() {
+            native_bridge_common::log_info!("[STATISTICS CACHE HIT] {}", k);
             if let Ok(mut hits) = self.hit_count.lock() { *hits += 1; }
             let key = k.to_string();
             let memory_size = if let Ok(tracker) = self.memory_tracker.lock() {
@@ -328,6 +329,7 @@ impl CacheAccessor<Path, CachedFileMetadata> for CustomStatisticsCache {
                 policy_guard.on_access(&key, memory_size);
             }
         } else {
+            native_bridge_common::log_info!("[STATISTICS CACHE MISS] {}", k);
             if let Ok(mut misses) = self.miss_count.lock() { *misses += 1; }
         }
 
@@ -336,6 +338,7 @@ impl CacheAccessor<Path, CachedFileMetadata> for CustomStatisticsCache {
 
     fn put(&self, k: &Path, v: CachedFileMetadata) -> Option<CachedFileMetadata> {
         let key = k.to_string();
+        native_bridge_common::log_info!("[STATISTICS CACHE PUT] {} (memory_size={})", k, v.statistics.memory_size());
         let memory_size = v.statistics.memory_size();
 
         let eviction_candidates = if let Ok(_tracker) = self.memory_tracker.lock() {

@@ -176,6 +176,7 @@ impl TableProvider for IndexedTableProvider {
         _filters: &[Expr],
         _limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
+        native_bridge_common::log_info!("[INDEXED PATH] IndexedTableProvider::scan() called, {} segments, projection={:?}", self.config.segments.len(), projection.map(|p| p.len()));
         let full_schema = self.config.schema.clone();
         // Output schema = what DataFusion expects
         let output_schema: SchemaRef = match projection {

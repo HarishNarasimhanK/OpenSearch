@@ -61,7 +61,23 @@ impl MutexFileMetadataCache {
 impl CacheAccessor<Path, CachedFileMetadataEntry> for MutexFileMetadataCache {
     fn get(&self, k: &Path) -> Option<CachedFileMetadataEntry> {
         match self.inner.lock() {
-            Ok(cache) => cache.get(k),
+            Ok(cache) => {
+                let result = cache.get(k);
+                if result.is_some() {
+                    let bt = std::backtrace::Backtrace::force_capture();
+                    let bt_str = format!("{}", bt);
+                    // Extract just the first few relevant frames
+                    let caller: String = bt_str.lines()
+                        .filter(|l| l.contains("opensearch_datafusion") || l.contains("datafusion"))
+                        .take(3)
+                        .collect::<Vec<_>>()
+                        .join(" | ");
+                    native_bridge_common::log_info!("[METADATA CACHE HIT] {} caller={}", k, caller);
+                } else {
+                    native_bridge_common::log_info!("[METADATA CACHE MISS] {}", k);
+                }
+                result
+            }
             Err(e) => {
                 log_cache_error("get", &e.to_string());
                 None

@@ -488,6 +488,7 @@ pub unsafe fn sql_to_substrait(
             )
             .build()?;
 
+        native_bridge_common::log_info!("[VANILLA PATH] sql_to_substrait: caches wired into session RuntimeEnv");
         let state = SessionStateBuilder::new()
             .with_config(SessionConfig::new())
             .with_runtime_env(Arc::from(runtime_env))

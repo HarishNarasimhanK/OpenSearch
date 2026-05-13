@@ -73,6 +73,7 @@ pub async fn execute_query(
                     runtime.runtime_env.cache_manager.get_file_statistic_cache(),
                 ),
         );
+    native_bridge_common::log_info!("[VANILLA PATH] execute_query: caches wired into per-query RuntimeEnv");
 
     // If a per-query memory pool is provided, set it on the same builder.
     // The per-query pool wraps the global pool, so global limits are still enforced.
@@ -166,6 +167,7 @@ pub async fn execute_with_context(
     plan_bytes: &[u8],
     cpu_executor: DedicatedExecutor,
 ) -> Result<i64, DataFusionError> {
+    native_bridge_common::log_info!("[VANILLA PATH] execute_with_context called (ListingTable scan)");
     let substrait_plan = Plan::decode(plan_bytes).map_err(|e| {
         DataFusionError::Execution(format!("Failed to decode Substrait: {}", e))
     })?;

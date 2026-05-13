@@ -111,4 +111,16 @@ tasks.register("run", RunTask) {
   group = 'Verification'
 
   impliesSubProjects = true
+
+  if (findProperty('dataPath')) {
+    doFirst {
+      def dataDir = new File("${project.buildDir}/testclusters/runTask-0/data")
+      if (dataDir.exists()) {
+        project.delete(dataDir)
+      }
+      def srcDir = new File(findProperty('dataPath'))
+      ant.symlink(link: dataDir.absolutePath, resource: srcDir.absolutePath)
+      println "Symlinked data dir: ${dataDir} -> ${srcDir}"
+    }
+  }
 }

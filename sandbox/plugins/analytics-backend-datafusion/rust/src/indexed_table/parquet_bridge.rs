@@ -50,6 +50,7 @@ pub async fn load_parquet_metadata(
     store: Arc<dyn ObjectStore>,
     location: &object_store::path::Path,
 ) -> std::result::Result<(SchemaRef, u64, Arc<ParquetMetaData>), String> {
+    native_bridge_common::log_info!("[INDEXED PATH] load_parquet_metadata: reading footer from disk for {}", location);
     let meta = store
         .head(location)
         .await
