@@ -441,9 +441,19 @@ pub async unsafe fn execute_indexed_with_context(
     let state = ctx.state();
     let store = state.runtime_env().object_store(&table_path)?;
 
-    let (segments, schema) = build_segments(&state, Arc::clone(&store), object_metas.as_ref())
-        .await
-        .map_err(DataFusionError::Execution)?;
+    let metadata_cache = state.runtime_env().cache_manager.get_file_metadata_cache();
+    native_bridge_common::log_info!(
+        "[INDEXED PATH] build_segments: passing metadata_cache to build_segments"
+    );
+
+    let (segments, schema) = build_segments(
+        &state,
+        Arc::clone(&store),
+        object_metas.as_ref(),
+        Some(metadata_cache),
+    )
+    .await
+    .map_err(DataFusionError::Execution)?;
     native_bridge_common::log_info!("[INDEXED PATH] build_segments completed: {} segments", segments.len());
     for (i, seg) in segments.iter().enumerate() {
     }

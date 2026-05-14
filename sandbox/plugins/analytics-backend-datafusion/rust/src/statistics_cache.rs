@@ -319,7 +319,7 @@ impl CacheAccessor<Path, CachedFileMetadata> for CustomStatisticsCache {
         let result = self.inner_cache.get(k);
 
         if result.is_some() {
-            // native_bridge_common::log_info!("[STATISTICS CACHE HIT] {}", k);
+            native_bridge_common::log_info!("[STATISTICS CACHE HIT] {}", k);
             if let Ok(mut hits) = self.hit_count.lock() { *hits += 1; }
             let key = k.to_string();
             let memory_size = if let Ok(tracker) = self.memory_tracker.lock() {
@@ -329,7 +329,7 @@ impl CacheAccessor<Path, CachedFileMetadata> for CustomStatisticsCache {
                 policy_guard.on_access(&key, memory_size);
             }
         } else {
-            // native_bridge_common::log_info!("[STATISTICS CACHE MISS] {}", k);
+            native_bridge_common::log_info!("[STATISTICS CACHE MISS] {}", k);
             if let Ok(mut misses) = self.miss_count.lock() { *misses += 1; }
         }
 

@@ -43,31 +43,77 @@ use futures::FutureExt;
 use object_store::{ObjectStore, ObjectStoreExt};
 use prost::bytes::Bytes;
 
+use datafusion::datasource::physical_plan::parquet::metadata::DFParquetMetadata;
+use datafusion::execution::cache::cache_manager::FileMetadataCache;
+use datafusion::parquet::arrow::parquet_to_arrow_schema;
+
 // ── Parquet Metadata Loading ─────────────────────────────────────────
 
 /// Load parquet metadata with page index over the object store.
+///
+/// If `metadata_cache` is provided, this routes through DataFusion's
+/// `DFParquetMetadata` which checks the cache before reading from disk
+/// (and writes to the cache on miss). Without a cache, falls back to a
+/// direct `ArrowReaderMetadata::load_async` (one disk read per call).
 pub async fn load_parquet_metadata(
     store: Arc<dyn ObjectStore>,
     location: &object_store::path::Path,
+    metadata_cache: Option<Arc<dyn FileMetadataCache>>,
 ) -> std::result::Result<(SchemaRef, u64, Arc<ParquetMetaData>), String> {
-    native_bridge_common::log_info!("[INDEXED PATH] load_parquet_metadata: reading footer from disk for {}", location);
+    native_bridge_common::log_info!(
+        "[INDEXED PATH] load_parquet_metadata: cache_present={} for {}",
+        metadata_cache.is_some(),
+        location
+    );
+
     let meta = store
         .head(location)
         .await
         .map_err(|e| format!("object-store head {}: {}", location, e))?;
     let size = meta.size;
-    let mut reader =
-        datafusion::parquet::arrow::async_reader::ParquetObjectReader::new(store, location.clone())
-            .with_file_size(size);
-    let options = ArrowReaderOptions::new().with_page_index(true);
-    let arrow_metadata = ArrowReaderMetadata::load_async(&mut reader, options)
-        .await
-        .map_err(|e| format!("load parquet metadata {}: {}", location, e))?;
-    Ok((
-        arrow_metadata.schema().clone(),
-        size,
-        arrow_metadata.metadata().clone(),
-    ))
+
+    if let Some(cache) = metadata_cache {
+        // DFParquetMetadata::fetch_metadata consults the cache first
+        // (via FileMetadataCache.get) and writes on miss.
+        let pq_meta = DFParquetMetadata::new(&*store, &meta)
+            .with_file_metadata_cache(Some(cache))
+            .fetch_metadata()
+            .await
+            .map_err(|e| format!("fetch parquet metadata {}: {}", location, e))?;
+
+        // Derive Arrow schema directly from the (possibly cached) metadata,
+        // mirroring what DFParquetMetadata::fetch_schema does internally,
+        // so we avoid a second cache lookup.
+        let file_meta = pq_meta.file_metadata();
+        let schema = parquet_to_arrow_schema(
+            file_meta.schema_descr(),
+            file_meta.key_value_metadata(),
+        )
+        .map_err(|e| format!("parquet_to_arrow_schema {}: {}", location, e))?;
+
+        Ok((Arc::new(schema), size, pq_meta))
+    } else {
+        // Legacy path: no cache → always read from disk (used by tests
+        // and any caller that doesn't have a RuntimeEnv handy).
+        native_bridge_common::log_info!(
+            "[INDEXED PATH] load_parquet_metadata: reading footer from disk (no cache) for {}",
+            location
+        );
+        let mut reader = datafusion::parquet::arrow::async_reader::ParquetObjectReader::new(
+            store,
+            location.clone(),
+        )
+        .with_file_size(size);
+        let options = ArrowReaderOptions::new().with_page_index(true);
+        let arrow_metadata = ArrowReaderMetadata::load_async(&mut reader, options)
+            .await
+            .map_err(|e| format!("load parquet metadata {}: {}", location, e))?;
+        Ok((
+            arrow_metadata.schema().clone(),
+            size,
+            arrow_metadata.metadata().clone(),
+        ))
+    }
 }
 
 /// Configuration for creating a per-row-group parquet stream.

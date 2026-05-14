@@ -64,19 +64,9 @@ impl CacheAccessor<Path, CachedFileMetadataEntry> for MutexFileMetadataCache {
             Ok(cache) => {
                 let result = cache.get(k);
                 if result.is_some() {
-                    let bt = std::backtrace::Backtrace::force_capture();
-                    let bt_str = format!("{}", bt);
-                    // Extract just the first few relevant frames
-                    let caller: String = bt_str.lines()
-                        .filter(|l| l.contains("opensearch_datafusion") || l.contains("datafusion"))
-                        .take(3)
-                        .collect::<Vec<_>>()
-                        .join(" | ");
-                    let _ = caller; // suppress unused warning while logs are commented out
-                    // Per-file HIT/MISS logs disabled for clean perf benchmarks. Uncomment to debug.
-                    // native_bridge_common::log_info!("[METADATA CACHE HIT] {} caller={}", k, caller);
+                    native_bridge_common::log_info!("[METADATA CACHE HIT] {}", k);
                 } else {
-                    // native_bridge_common::log_info!("[METADATA CACHE MISS] {}", k);
+                    native_bridge_common::log_info!("[METADATA CACHE MISS] {}", k);
                 }
                 result
             }
