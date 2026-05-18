@@ -1333,7 +1333,7 @@ public class DataFormatAwareEngine implements Indexer {
     @Override
     public SegmentsStats segmentsStats(boolean includeSegmentFileSizes, boolean includeUnloadedSegments) {
         SegmentsStats stats = new SegmentsStats();
-        throw new UnsupportedOperationException("Unsupported operation");
+        return stats;
     }
 
     @Override
