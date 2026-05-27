@@ -189,7 +189,7 @@ public class DataFusionService extends AbstractLifecycleComponent {
         if (runtimeHandle == null) {
             throw new IllegalStateException("DataFusionService has not been started");
         }
-        return NativeBridge.stats();
+        return NativeBridge.stats(runtimeHandle.get());
     }
     // Cache management (node-level, delegates to native runtime)
 

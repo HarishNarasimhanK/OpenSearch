@@ -8,8 +8,11 @@
 
 package org.opensearch.be.datafusion.nativelib;
 
+import org.opensearch.be.datafusion.stats.CacheStats;
 import org.opensearch.be.datafusion.stats.NativeExecutorsStats;
+import org.opensearch.be.datafusion.stats.PartitionGateStats;
 import org.opensearch.be.datafusion.stats.RuntimeMetrics;
+import org.opensearch.be.datafusion.stats.SearchStats;
 import org.opensearch.be.datafusion.stats.TaskMonitorStats;
 import org.opensearch.common.io.stream.BytesStreamOutput;
 import org.opensearch.core.common.io.stream.StreamInput;
@@ -35,7 +38,7 @@ public class StatsLayoutPropertyTests extends OpenSearchTestCase {
 
     private static final int TRIES = 100;
 
-    private static final int FIELD_COUNT = 38;
+    private static final int FIELD_COUNT = 62;
 
     // ---- Generators ----
 
@@ -156,6 +159,49 @@ public class StatsLayoutPropertyTests extends OpenSearchTestCase {
                     assertEquals(tmGroups[g] + ".total_scheduled_duration_ms", values[base + 1], tm.totalScheduledDurationMs);
                     assertEquals(tmGroups[g] + ".total_idle_duration_ms", values[base + 2], tm.totalIdleDurationMs);
                 }
+
+                // Partition gates (offsets 30-37)
+                var dg = StatsLayout.readPartitionGate(seg, "datanode_gate");
+                assertEquals(values[30], dg.maxPermits);
+                assertEquals(values[31], dg.activePermits);
+                assertEquals(values[32], dg.totalWaitDurationMs);
+                assertEquals(values[33], dg.totalBatchesStarted);
+
+                var cg = StatsLayout.readPartitionGate(seg, "coordinator_gate");
+                assertEquals(values[34], cg.maxPermits);
+                assertEquals(values[35], cg.activePermits);
+                assertEquals(values[36], cg.totalWaitDurationMs);
+                assertEquals(values[37], cg.totalBatchesStarted);
+
+                // Cache stats (offsets 38-47)
+                var cs = StatsLayout.readCacheStats(seg);
+                assertEquals(values[38], cs.getMetadataCache().hitCount);
+                assertEquals(values[39], cs.getMetadataCache().missCount);
+                assertEquals(values[40], cs.getMetadataCache().entryCount);
+                assertEquals(values[41], cs.getMetadataCache().memoryBytes);
+                assertEquals(values[42], cs.getMetadataCache().sizeLimitBytes);
+                assertEquals(values[43], cs.getStatisticsCache().hitCount);
+                assertEquals(values[44], cs.getStatisticsCache().missCount);
+                assertEquals(values[45], cs.getStatisticsCache().entryCount);
+                assertEquals(values[46], cs.getStatisticsCache().memoryBytes);
+                assertEquals(values[47], cs.getStatisticsCache().sizeLimitBytes);
+
+                // Search stats (offsets 48-61)
+                var ss = StatsLayout.readSearchStats(seg);
+                assertEquals(values[48], ss.elapsedComputeMs);
+                assertEquals(values[49], ss.delegationCalls);
+                assertEquals(values[50], ss.rgProcessed);
+                assertEquals(values[51], ss.rgSkipped);
+                assertEquals(values[52], ss.prefetchWaitTimeMs);
+                assertEquals(values[53], ss.prefetchWaitCount);
+                assertEquals(values[54], ss.onBatchMaskTimeMs);
+                assertEquals(values[55], ss.parquetPollTimeMs);
+                assertEquals(values[56], ss.buildMaskTimeMs);
+                assertEquals(values[57], ss.filterRecordBatchTimeMs);
+                assertEquals(values[58], ss.parquetTimeMs);
+                assertEquals(values[59], ss.listingTableScan);
+                assertEquals(values[60], ss.singleCollectorScan);
+                assertEquals(values[61], ss.bitmapTreeScan);
             }
         }
     }
@@ -201,6 +247,10 @@ public class StatsLayoutPropertyTests extends OpenSearchTestCase {
                 var qe = StatsLayout.readTaskMonitor(original, "query_execution");
                 var sn = StatsLayout.readTaskMonitor(original, "stream_next");
                 var ps = StatsLayout.readTaskMonitor(original, "plan_setup");
+                var dg = StatsLayout.readPartitionGate(original, "datanode_gate");
+                var cg = StatsLayout.readPartitionGate(original, "coordinator_gate");
+                var cs = StatsLayout.readCacheStats(original);
+                var ss = StatsLayout.readSearchStats(original);
 
                 // Re-encode into new buffer
                 var reencoded = arena.allocate(StatsLayout.LAYOUT);
@@ -234,14 +284,46 @@ public class StatsLayoutPropertyTests extends OpenSearchTestCase {
                     sn.totalIdleDurationMs,
                     ps.totalPollDurationMs,
                     ps.totalScheduledDurationMs,
-                    ps.totalIdleDurationMs };
-                for (int i = 0; i < decoded.length; i++) {
+                    ps.totalIdleDurationMs,
+                    dg.maxPermits,
+                    dg.activePermits,
+                    dg.totalWaitDurationMs,
+                    dg.totalBatchesStarted,
+                    cg.maxPermits,
+                    cg.activePermits,
+                    cg.totalWaitDurationMs,
+                    cg.totalBatchesStarted,
+                    cs.getMetadataCache().hitCount,
+                    cs.getMetadataCache().missCount,
+                    cs.getMetadataCache().entryCount,
+                    cs.getMetadataCache().memoryBytes,
+                    cs.getMetadataCache().sizeLimitBytes,
+                    cs.getStatisticsCache().hitCount,
+                    cs.getStatisticsCache().missCount,
+                    cs.getStatisticsCache().entryCount,
+                    cs.getStatisticsCache().memoryBytes,
+                    cs.getStatisticsCache().sizeLimitBytes,
+                    ss.elapsedComputeMs,
+                    ss.delegationCalls,
+                    ss.rgProcessed,
+                    ss.rgSkipped,
+                    ss.prefetchWaitTimeMs,
+                    ss.prefetchWaitCount,
+                    ss.onBatchMaskTimeMs,
+                    ss.parquetPollTimeMs,
+                    ss.buildMaskTimeMs,
+                    ss.filterRecordBatchTimeMs,
+                    ss.parquetTimeMs,
+                    ss.listingTableScan,
+                    ss.singleCollectorScan,
+                    ss.bitmapTreeScan };
+                for (int i = 0; i < FIELD_COUNT; i++) {
                     reencoded.setAtIndex(ValueLayout.JAVA_LONG, i, decoded[i]);
                 }
 
-                // Compare byte-for-byte over the decoded prefix
-                byte[] originalBytes = original.asSlice(0, (long) decoded.length * Long.BYTES).toArray(ValueLayout.JAVA_BYTE);
-                byte[] reencodedBytes = reencoded.asSlice(0, (long) decoded.length * Long.BYTES).toArray(ValueLayout.JAVA_BYTE);
+                // Compare byte-for-byte
+                byte[] originalBytes = original.toArray(ValueLayout.JAVA_BYTE);
+                byte[] reencodedBytes = reencoded.toArray(ValueLayout.JAVA_BYTE);
                 assertArrayEquals("Decode-then-reencode must produce byte-identical buffer", originalBytes, reencodedBytes);
             }
         }
