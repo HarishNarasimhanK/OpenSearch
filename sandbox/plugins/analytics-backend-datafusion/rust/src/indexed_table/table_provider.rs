@@ -49,6 +49,12 @@ use super::stream::{FilterStrategy, IndexedExec, RowGroupInfo};
 use crate::datafusion_query_config::DatafusionQueryConfig;
 use crate::indexed_table::metrics::StreamMetrics;
 use std::collections::HashSet;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
+use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::physical_plan::RecordBatchStream;
+use futures::Stream;
 
 /// Info about a segment and its corresponding parquet file.
 #[derive(Debug, Clone)]
@@ -394,6 +400,7 @@ impl ExecutionPlan for QueryShardExec {
         let pmetrics = PartitionMetrics::new(&self.metrics, partition);
         let stream_metrics =
             pmetrics.into_stream_metrics(Some(Arc::clone(&self.inner_parquet_metrics)));
+        let stream_metrics_for_drop = stream_metrics.clone();
 
         // Build one IndexedExec per SegmentChunk, chain via UnionExec-style concatenation.
         let mut execs: Vec<Arc<dyn ExecutionPlan>> = Vec::with_capacity(assignment.chunks.len());
@@ -451,14 +458,15 @@ impl ExecutionPlan for QueryShardExec {
         }
 
         if execs.is_empty() {
-            // No work — empty stream
             let empty =
                 datafusion::physical_plan::empty::EmptyExec::new(self.projected_schema.clone());
-            return empty.execute(0, context);
+            let inner = empty.execute(0, context)?;
+            return Ok(Box::pin(AccumulatingStream { inner, stream_metrics: stream_metrics_for_drop }));
         }
 
         if execs.len() == 1 {
-            return execs.remove(0).execute(0, context);
+            let inner = execs.remove(0).execute(0, context)?;
+            return Ok(Box::pin(AccumulatingStream { inner, stream_metrics: stream_metrics_for_drop }));
         }
 
         // Multiple chunks in one partition — concatenate via UnionExec
@@ -468,7 +476,33 @@ impl ExecutionPlan for QueryShardExec {
         // so wrap in CoalescePartitionsExec.
         let coalesced =
             datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec::new(union);
-        coalesced.execute(0, context)
+        let inner = coalesced.execute(0, context)?;
+        Ok(Box::pin(AccumulatingStream { inner, stream_metrics: stream_metrics_for_drop }))
+    }
+}
+
+struct AccumulatingStream {
+    inner: SendableRecordBatchStream,
+    stream_metrics: StreamMetrics,
+}
+
+impl Stream for AccumulatingStream {
+    type Item = Result<RecordBatch>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Pin::new(&mut self.inner).poll_next(cx)
+    }
+}
+
+impl RecordBatchStream for AccumulatingStream {
+    fn schema(&self) -> SchemaRef {
+        self.inner.schema()
+    }
+}
+
+impl Drop for AccumulatingStream {
+    fn drop(&mut self) {
+        crate::search_stats::accumulate(&self.stream_metrics);
     }
 }
 

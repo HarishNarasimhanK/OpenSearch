@@ -59,7 +59,7 @@ public class DataFusionStatsActionTests extends OpenSearchTestCase {
         nodeClient.close();
     }
 
-    // ---- Test: routes() returns GET _plugins/datafusion/stats (Requirement 1.1) ----
+    // ---- Test: routes() returns GET _plugins/_analytics_backend_datafusion/stats (Requirement 1.1) ----
 
     public void testRoutesReturnsStatsEndpoint() {
         DataFusionService mockService = mock(DataFusionService.class);
@@ -68,7 +68,7 @@ public class DataFusionStatsActionTests extends OpenSearchTestCase {
         List<Route> routes = action.routes();
         assertEquals(1, routes.size());
         assertEquals(RestRequest.Method.GET, routes.get(0).getMethod());
-        assertEquals("_plugins/analytics_backend_datafusion/stats", routes.get(0).getPath());
+        assertEquals("_plugins/_analytics_backend_datafusion/stats", routes.get(0).getPath());
     }
 
     // ---- Test: getName() returns "datafusion_stats_action" (Requirement 1.1) ----

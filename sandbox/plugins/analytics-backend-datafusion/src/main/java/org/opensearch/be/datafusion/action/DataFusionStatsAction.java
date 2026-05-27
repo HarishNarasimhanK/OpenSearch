@@ -20,7 +20,7 @@ import org.opensearch.transport.client.node.NodeClient;
 import java.util.List;
 
 /**
- * REST handler for {@code GET _plugins/analytics_backend_datafusion/stats}.
+ * REST handler for {@code GET _plugins/_analytics_backend_datafusion/stats}.
  * <p>
  * Collects native executor metrics (Tokio runtime + task monitors) from
  * {@link DataFusionService} and returns them as a JSON response. Follows
@@ -47,7 +47,7 @@ public class DataFusionStatsAction extends BaseRestHandler {
 
     @Override
     public List<Route> routes() {
-        return List.of(new Route(RestRequest.Method.GET, "_plugins/analytics_backend_datafusion/stats"));
+        return List.of(new Route(RestRequest.Method.GET, "_plugins/_analytics_backend_datafusion/stats"));
     }
 
     @Override
