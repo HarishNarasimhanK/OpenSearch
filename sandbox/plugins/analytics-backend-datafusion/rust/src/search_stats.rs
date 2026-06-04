@@ -42,7 +42,7 @@ pub fn inc_bitmap_tree_scan() {
 
 pub fn accumulate(m: &StreamMetrics) {
     if let Some(ref t) = m.elapsed_compute {
-        ELAPSED_COMPUTE_MS.fetch_add((t.value() / 1_000_000) as i64, Ordering::Relaxed);
+        ELAPSED_COMPUTE_MS.fetch_add(t.value() as i64, Ordering::Relaxed);
     }
     if let Some(ref c) = m.ffm_collector_calls {
         DELEGATION_CALLS.fetch_add(c.value() as i64, Ordering::Relaxed);
@@ -54,25 +54,30 @@ pub fn accumulate(m: &StreamMetrics) {
         RG_SKIPPED.fetch_add(c.value() as i64, Ordering::Relaxed);
     }
     if let Some(ref t) = m.prefetch_wait_time {
-        PREFETCH_WAIT_TIME_MS.fetch_add((t.value() / 1_000_000) as i64, Ordering::Relaxed);
+        PREFETCH_WAIT_TIME_MS.fetch_add(t.value() as i64, Ordering::Relaxed);
     }
-    if let Some(ref c) = m.prefetch_wait_count {
-        PREFETCH_WAIT_COUNT.fetch_add(c.value() as i64, Ordering::Relaxed);
+    if let Some(ref t) = m.mask_slice_time {
+        // Hack: reuse prefetch_wait_count slot for mask_slice_time on test branch
+        PREFETCH_WAIT_COUNT.fetch_add(t.value() as i64, Ordering::Relaxed);
     }
     if let Some(ref t) = m.on_batch_mask_time {
-        ON_BATCH_MASK_TIME_MS.fetch_add((t.value() / 1_000_000) as i64, Ordering::Relaxed);
+        ON_BATCH_MASK_TIME_MS.fetch_add(t.value() as i64, Ordering::Relaxed);
+    }
+    if let Some(ref t) = m.projection_fixup_time {
+        // Hack: reuse listing_table_scan slot for projection_fixup_time on test branch
+        LISTING_TABLE_SCAN.fetch_add(t.value() as i64, Ordering::Relaxed);
     }
     if let Some(ref t) = m.parquet_poll_time {
-        PARQUET_POLL_TIME_MS.fetch_add((t.value() / 1_000_000) as i64, Ordering::Relaxed);
+        PARQUET_POLL_TIME_MS.fetch_add(t.value() as i64, Ordering::Relaxed);
     }
     if let Some(ref t) = m.build_mask_time {
-        BUILD_MASK_TIME_MS.fetch_add((t.value() / 1_000_000) as i64, Ordering::Relaxed);
+        BUILD_MASK_TIME_MS.fetch_add(t.value() as i64, Ordering::Relaxed);
     }
     if let Some(ref t) = m.filter_record_batch_time {
-        FILTER_RECORD_BATCH_TIME_MS.fetch_add((t.value() / 1_000_000) as i64, Ordering::Relaxed);
+        FILTER_RECORD_BATCH_TIME_MS.fetch_add(t.value() as i64, Ordering::Relaxed);
     }
     if let Some(ref t) = m.parquet_time {
-        PARQUET_TIME_MS.fetch_add((t.value() / 1_000_000) as i64, Ordering::Relaxed);
+        PARQUET_TIME_MS.fetch_add(t.value() as i64, Ordering::Relaxed);
     }
 }
 

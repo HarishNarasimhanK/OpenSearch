@@ -98,6 +98,28 @@ pub struct StreamMetrics {
     pub parquet_poll_time: Option<Time>,
     /// Accumulated inner `DataSourceExec` parquet metrics (shared across partitions).
     pub inner_parquet_metrics: Option<Arc<std::sync::Mutex<Vec<MetricsSet>>>>,
+    // Debug: time spent in RG setup (selectivity + RowSelection + PositionMap + create_stream)
+    pub dbg_rg_setup_time: Option<Time>,
+    // Debug: time spent in parquet Pending returns
+    pub dbg_parquet_pending_time: Option<Time>,
+    // Debug: time spent in rg_poll Pending returns
+    pub dbg_rg_poll_pending_time: Option<Time>,
+    // Debug: time spent in finalize_batch + coalescer push (after parquet returns Ready)
+    pub dbg_finalize_coalesce_time: Option<Time>,
+    // Debug: idle wall-clock between consecutive poll_next calls (async scheduling gaps)
+    pub dbg_idle_between_polls_time: Option<Time>,
+    // Debug: accumulated wall-clock spent inside poll_next bodies (active poll time)
+    pub dbg_poll_next_wall_time: Option<Time>,
+    // Debug: time draining a completed batch to the caller + end-of-stream bookkeeping
+    pub dbg_emit_time: Option<Time>,
+    // Debug: wall-clock measured at entry/exit of poll_inner itself (sanity vs elapsed_compute)
+    pub dbg_poll_inner_time: Option<Time>,
+    // Debug: wall-clock measured INSIDE poll_inner (before the loop, via drop guard at fn exit)
+    pub dbg_poll_inner_inside_time: Option<Time>,
+    // Debug: number of poll_next invocations (to divide the elapsed/poll_inner gap)
+    pub dbg_poll_next_count: Option<Count>,
+    // Debug: time spent in the one-time init_prefetch call (inside elapsed, outside poll_inner)
+    pub dbg_init_prefetch_time: Option<Time>,
 }
 
 impl StreamMetrics {
@@ -134,6 +156,17 @@ impl StreamMetrics {
             projection_fixup_time: None,
             parquet_poll_time: None,
             inner_parquet_metrics: None,
+            dbg_rg_setup_time: None,
+            dbg_parquet_pending_time: None,
+            dbg_rg_poll_pending_time: None,
+            dbg_finalize_coalesce_time: None,
+            dbg_idle_between_polls_time: None,
+            dbg_poll_next_wall_time: None,
+            dbg_emit_time: None,
+            dbg_poll_inner_time: None,
+            dbg_init_prefetch_time: None,
+            dbg_poll_inner_inside_time: None,
+            dbg_poll_next_count: None,
         }
     }
 }
@@ -169,6 +202,18 @@ pub struct PartitionMetrics {
     pub mask_slice_time: Time,
     pub projection_fixup_time: Time,
     pub parquet_poll_time: Time,
+    // Debug timers for breakdown
+    pub dbg_rg_setup_time: Time,
+    pub dbg_parquet_pending_time: Time,
+    pub dbg_rg_poll_pending_time: Time,
+    pub dbg_finalize_coalesce_time: Time,
+    pub dbg_idle_between_polls_time: Time,
+    pub dbg_poll_next_wall_time: Time,
+    pub dbg_emit_time: Time,
+    pub dbg_poll_inner_time: Time,
+    pub dbg_init_prefetch_time: Time,
+    pub dbg_poll_inner_inside_time: Time,
+    pub dbg_poll_next_count: Count,
 }
 
 impl PartitionMetrics {
@@ -209,6 +254,27 @@ impl PartitionMetrics {
                 .subset_time("projection_fixup_time", partition),
             parquet_poll_time: MetricBuilder::new(metrics)
                 .subset_time("parquet_poll_time", partition),
+            dbg_rg_setup_time: MetricBuilder::new(metrics)
+                .subset_time("dbg_rg_setup_time", partition),
+            dbg_parquet_pending_time: MetricBuilder::new(metrics)
+                .subset_time("dbg_parquet_pending_time", partition),
+            dbg_rg_poll_pending_time: MetricBuilder::new(metrics)
+                .subset_time("dbg_rg_poll_pending_time", partition),
+            dbg_finalize_coalesce_time: MetricBuilder::new(metrics)
+                .subset_time("dbg_finalize_coalesce_time", partition),
+            dbg_idle_between_polls_time: MetricBuilder::new(metrics)
+                .subset_time("dbg_idle_between_polls_time", partition),
+            dbg_poll_next_wall_time: MetricBuilder::new(metrics)
+                .subset_time("dbg_poll_next_wall_time", partition),
+            dbg_emit_time: MetricBuilder::new(metrics)
+                .subset_time("dbg_emit_time", partition),
+            dbg_poll_inner_time: MetricBuilder::new(metrics)
+                .subset_time("dbg_poll_inner_time", partition),
+            dbg_init_prefetch_time: MetricBuilder::new(metrics)
+                .subset_time("dbg_init_prefetch_time", partition),
+            dbg_poll_inner_inside_time: MetricBuilder::new(metrics)
+                .subset_time("dbg_poll_inner_inside_time", partition),
+            dbg_poll_next_count: counter("dbg_poll_next_count"),
         }
     }
 
@@ -248,6 +314,17 @@ impl PartitionMetrics {
             projection_fixup_time: Some(self.projection_fixup_time),
             parquet_poll_time: Some(self.parquet_poll_time),
             inner_parquet_metrics,
+            dbg_rg_setup_time: Some(self.dbg_rg_setup_time),
+            dbg_parquet_pending_time: Some(self.dbg_parquet_pending_time),
+            dbg_rg_poll_pending_time: Some(self.dbg_rg_poll_pending_time),
+            dbg_finalize_coalesce_time: Some(self.dbg_finalize_coalesce_time),
+            dbg_idle_between_polls_time: Some(self.dbg_idle_between_polls_time),
+            dbg_poll_next_wall_time: Some(self.dbg_poll_next_wall_time),
+            dbg_emit_time: Some(self.dbg_emit_time),
+            dbg_poll_inner_time: Some(self.dbg_poll_inner_time),
+            dbg_init_prefetch_time: Some(self.dbg_init_prefetch_time),
+            dbg_poll_inner_inside_time: Some(self.dbg_poll_inner_inside_time),
+            dbg_poll_next_count: Some(self.dbg_poll_next_count),
         }
     }
 }

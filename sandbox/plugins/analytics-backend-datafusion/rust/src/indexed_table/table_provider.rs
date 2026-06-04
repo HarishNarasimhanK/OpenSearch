@@ -478,6 +478,7 @@ impl ExecutionPlan for QueryShardExec {
             datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec::new(union);
         let inner = coalesced.execute(0, context)?;
         Ok(Box::pin(AccumulatingStream { inner, stream_metrics: stream_metrics_for_drop }))
+        
     }
 }
 
@@ -502,6 +503,70 @@ impl RecordBatchStream for AccumulatingStream {
 
 impl Drop for AccumulatingStream {
     fn drop(&mut self) {
+        let m = &self.stream_metrics;
+        use datafusion::physical_plan::metrics::Time;
+        let to_ms = |t: &Option<Time>| -> f64 { t.as_ref().map_or(0usize, |v| v.value()) as f64 / 1_000_000.0 };
+        // wall_clock = accumulated time spent inside poll_next bodies,
+        // summed across every poll of every IndexedStream in this query.
+        let wall = to_ms(&m.dbg_poll_next_wall_time);
+        // The buckets are mutually exclusive per loop iteration and now
+        // cover every exit path, so `other` should be near zero (it only
+        // holds the few ns of per-poll bookkeeping outside the loop).
+        let bucketed = to_ms(&m.dbg_rg_setup_time)
+            + to_ms(&m.dbg_parquet_pending_time)
+            + to_ms(&m.dbg_rg_poll_pending_time)
+            + to_ms(&m.dbg_finalize_coalesce_time)
+            + to_ms(&m.dbg_emit_time);
+        let other = (wall - bucketed).max(0.0);
+        let poll_count = m.dbg_poll_next_count.as_ref().map_or(0, |c| c.value());
+        // Foreground fine-grained coverage: sum of the discrete leaf-level
+        // work timers that run inside poll_inner (excludes index_time and
+        // prefetch_wait, which are background/parked, not foreground work).
+        // `covered` = what fraction of elapsed these leaf timers explain;
+        // `residual` = elapsed not attributed to any leaf timer.
+        let elapsed = to_ms(&m.elapsed_compute);
+        let fg_sum = to_ms(&m.parquet_poll_time)
+            + to_ms(&m.parquet_time)
+            + to_ms(&m.on_batch_mask_time)
+            + to_ms(&m.build_mask_time)
+            + to_ms(&m.filter_record_batch_time);
+        let fg_residual = (elapsed - fg_sum).max(0.0);
+        let fg_covered_pct = if elapsed > 0.0 { fg_sum / elapsed * 100.0 } else { 0.0 };
+        // Coarse coverage: the per-loop-iteration buckets are exhaustive
+        // (every poll_inner exit lands in exactly one), so they should
+        // explain ~100% of poll_inner. This is the breakdown that closes;
+        // fg_* above only covers the leaf arrow kernels (a small subset).
+        let poll_inner = to_ms(&m.dbg_poll_inner_time);
+        let coarse_sum = bucketed; // rg_setup+parquet_pending+rg_poll_pending+finalize_coalesce+emit
+        let coarse_covered_pct = if poll_inner > 0.0 { coarse_sum / poll_inner * 100.0 } else { 0.0 };
+        native_bridge_common::log_info!(
+            "[stream-drop] wall_clock={:.3}ms elapsed={:.3}ms poll_inner={:.3}ms poll_inner_inside={:.3}ms init_prefetch={:.3}ms parquet_poll={:.3}ms parquet_time={:.3}ms on_batch_mask={:.3}ms build_mask={:.3}ms filter_rb={:.3}ms prefetch_wait={:.3}ms index_time={:.3}ms rg_setup={:.3}ms parquet_pending={:.3}ms rg_poll_pending={:.3}ms finalize_coalesce={:.3}ms emit={:.3}ms idle_between_polls={:.3}ms other={:.3}ms poll_count={} | fg_sum={:.3}ms fg_residual={:.3}ms fg_covered={:.1}% | coarse_sum={:.3}ms coarse_covered={:.1}%",
+            wall,
+            elapsed,
+            to_ms(&m.dbg_poll_inner_time),
+            to_ms(&m.dbg_poll_inner_inside_time),
+            to_ms(&m.dbg_init_prefetch_time),
+            to_ms(&m.parquet_poll_time),
+            to_ms(&m.parquet_time),
+            to_ms(&m.on_batch_mask_time),
+            to_ms(&m.build_mask_time),
+            to_ms(&m.filter_record_batch_time),
+            to_ms(&m.prefetch_wait_time),
+            to_ms(&m.index_time),
+            to_ms(&m.dbg_rg_setup_time),
+            to_ms(&m.dbg_parquet_pending_time),
+            to_ms(&m.dbg_rg_poll_pending_time),
+            to_ms(&m.dbg_finalize_coalesce_time),
+            to_ms(&m.dbg_emit_time),
+            to_ms(&m.dbg_idle_between_polls_time),
+            other,
+            poll_count,
+            fg_sum,
+            fg_residual,
+            fg_covered_pct,
+            coarse_sum,
+            coarse_covered_pct,
+        );
         crate::search_stats::accumulate(&self.stream_metrics);
     }
 }

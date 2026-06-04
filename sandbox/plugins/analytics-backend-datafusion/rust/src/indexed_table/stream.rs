@@ -167,9 +167,17 @@ impl IndexReader {
         let evaluator = Arc::clone(&self.evaluator);
         let row_groups = self.row_groups.clone();
         let doc_range = self.doc_range;
+        native_bridge_common::log_info!(
+            "[prefetch-state] thread={:?} rg={} action=dispatch",
+            std::thread::current().id(),
+            rg_idx
+        );
+
         let handle = tokio::task::spawn_blocking(move || {
             Self::fetch_row_group(&evaluator, &row_groups, rg_idx, doc_range)
         });
+
+
         self.pending_prefetch = Some(handle);
     }
 
@@ -203,9 +211,16 @@ impl IndexReader {
                         // If we had parked on this receiver, account the
                         // elapsed wall-clock as prefetch_wait_time.
                         if let Some(started) = self.pending_since.take() {
+                            let waited = started.elapsed();
                             if let Some(ref t) = self.prefetch_wait_time {
-                                t.add_duration(started.elapsed());
+                                t.add_duration(waited);
                             }
+                            native_bridge_common::log_info!(
+                                "[prefetch-state] thread={:?} rg={} action=wake waited={:?}",
+                                std::thread::current().id(),
+                                self.current_rg_idx,
+                                waited
+                            );
                         }
                         self.pending_prefetch = None;
                         self.cached_result = Some(result);
@@ -245,6 +260,11 @@ impl IndexReader {
                             if let Some(ref c) = self.prefetch_wait_count {
                                 c.add(1);
                             }
+                            native_bridge_common::log_info!(
+                                "[prefetch-state] thread={:?} rg={} action=park",
+                                std::thread::current().id(),
+                                self.current_rg_idx
+                            );
                         }
                         return Poll::Pending;
                     }
@@ -455,6 +475,8 @@ struct IndexedStream {
     emit_row_ids: bool,
     /// Index in the output schema where computed `___row_id` is inserted.
     row_id_output_index: Option<usize>,
+    /// Last time poll_next exited (for measuring gap between polls)
+    last_poll_exit: Option<Instant>,
 }
 
 impl IndexedStream {
@@ -518,6 +540,7 @@ impl IndexedStream {
             global_base,
             emit_row_ids,
             row_id_output_index,
+            last_poll_exit: None,
         }
     }
 
@@ -692,10 +715,53 @@ impl IndexedStream {
     }
 }
 
+/// RAII guard that accumulates wall-clock into a `Time` metric when dropped.
+/// Used to measure `poll_inner` from inside the function (before the loop)
+/// to the function's exit, regardless of which `return` path is taken.
+struct PollInnerGuard {
+    start: Instant,
+    metric: datafusion::physical_plan::metrics::Time,
+}
+
+impl PollInnerGuard {
+    fn new(metric: datafusion::physical_plan::metrics::Time) -> Self {
+        Self {
+            start: Instant::now(),
+            metric,
+        }
+    }
+}
+
+impl Drop for PollInnerGuard {
+    fn drop(&mut self) {
+        self.metric.add_duration(self.start.elapsed());
+    }
+}
+
 impl Stream for IndexedStream {
     type Item = Result<RecordBatch>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        // Wall-clock for the entire poll_next body. Accumulated across
+        // every poll of every stream into a single partition metric so
+        // the stream-drop log reports total active time spent inside
+        // poll_next (as opposed to the wrapper stream's lifetime).
+        let body_start = Instant::now();
+
+        // Count this poll_next invocation.
+        if let Some(ref c) = self.metrics.dbg_poll_next_count {
+            c.add(1);
+        }
+
+        // Measure idle gap since last poll_next exited — async scheduling
+        // time the runtime spent away from this stream. Accumulated as a
+        // proper partition metric so it flows to the stream-drop log.
+        if let Some(last_exit) = self.last_poll_exit {
+            if let Some(ref t) = self.metrics.dbg_idle_between_polls_time {
+                t.add_duration(last_exit.elapsed());
+            }
+        }
+
         // Manual timer for `elapsed_compute`: total wall time spent
         // inside this poll. Attributed to the operator for EXPLAIN
         // ANALYZE, separate from `index_time` / `parquet_time` which
@@ -703,15 +769,34 @@ impl Stream for IndexedStream {
         let poll_start = Instant::now();
 
         if !self.initialized {
+            let t_init = Instant::now();
             self.index_reader.init_prefetch();
             self.initialized = true;
+            let init_dur = t_init.elapsed();
+            if let Some(ref t) = self.metrics.dbg_init_prefetch_time {
+                t.add_duration(init_dur);
+            }
+            native_bridge_common::log_info!("[stream] init_prefetch={:?}", init_dur);
         }
 
+        let t_poll_inner = Instant::now();
         let result = self.as_mut().poll_inner(cx);
+        if let Some(ref t) = self.metrics.dbg_poll_inner_time {
+            t.add_duration(t_poll_inner.elapsed());
+        }
 
         if let Some(ref t) = self.metrics.elapsed_compute {
             t.add_duration(poll_start.elapsed());
         }
+
+        // Record exit time for next gap measurement
+        self.last_poll_exit = Some(Instant::now());
+
+        // Accumulate the full poll_next body wall-clock.
+        if let Some(ref t) = self.metrics.dbg_poll_next_wall_time {
+            t.add_duration(body_start.elapsed());
+        }
+
         result
     }
 }
@@ -721,7 +806,17 @@ impl IndexedStream {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<RecordBatch>>> {
+        // Measure poll_inner from here (before the loop) to the function's
+        // end — fires on whichever `return` is taken, via the guard's Drop.
+        // Separate from the call-site timer in poll_next so we can compare.
+        let _inside_guard = self
+            .metrics
+            .dbg_poll_inner_inside_time
+            .clone()
+            .map(PollInnerGuard::new);
         loop {
+            let t_iter = Instant::now();
+
             // 1. Drain any completed batch from the coalescer first.
             if let Some(batch) = self.batch_coalescer.next_completed_batch() {
                 if let Some(ref counter) = self.metrics.output_rows {
@@ -730,11 +825,13 @@ impl IndexedStream {
                 if let Some(ref counter) = self.metrics.batches_produced {
                     counter.add(1);
                 }
+                if let Some(ref t) = self.metrics.dbg_emit_time { t.add_duration(t_iter.elapsed()); }
                 return Poll::Ready(Some(Ok(batch)));
             }
 
             // 2. If upstream is done and coalescer has drained, we're done.
             if self.coalescer_finished && self.batch_coalescer.is_empty() {
+                if let Some(ref t) = self.metrics.dbg_emit_time { t.add_duration(t_iter.elapsed()); }
                 return Poll::Ready(None);
             }
 
@@ -746,6 +843,7 @@ impl IndexedStream {
                     return Poll::Ready(Some(Err(e)));
                 }
                 self.coalescer_finished = true;
+                if let Some(ref t) = self.metrics.dbg_emit_time { t.add_duration(t_iter.elapsed()); }
                 continue;
             }
 
@@ -754,6 +852,7 @@ impl IndexedStream {
             if self.coalescer_finished {
                 // Unreachable in practice — step 1 already drained or
                 // step 2 already returned. Defensive.
+                if let Some(ref t) = self.metrics.dbg_emit_time { t.add_duration(t_iter.elapsed()); }
                 return Poll::Ready(None);
             }
 
@@ -763,8 +862,9 @@ impl IndexedStream {
             if let Some(ref mut stream) = self.current_stream {
                 let t_poll = Instant::now();
                 let poll_result = Pin::new(stream).poll_next(cx);
+                let poll_dur = t_poll.elapsed();
                 if let Some(ref t) = self.metrics.parquet_poll_time {
-                    t.add_duration(t_poll.elapsed());
+                    t.add_duration(poll_dur);
                 }
                 match poll_result {
                     Poll::Ready(Some(Ok(batch))) if batch.num_rows() > 0 => {
@@ -776,6 +876,11 @@ impl IndexedStream {
                             Err(e) => return Poll::Ready(Some(Err(e))),
                         };
                         if filtered.num_rows() == 0 {
+                            // Refinement filter dropped every row — still
+                            // real work done this iteration (finalize_batch).
+                            if let Some(ref t) = self.metrics.dbg_finalize_coalesce_time {
+                                t.add_duration(t_iter.elapsed());
+                            }
                             continue;
                         }
                         // Push into coalescer under a timer.
@@ -788,7 +893,12 @@ impl IndexedStream {
                             c.add(1);
                         }
                         match status {
-                            Ok(PushBatchStatus::Continue) => continue,
+                            Ok(PushBatchStatus::Continue) => {
+                                if let Some(ref t) = self.metrics.dbg_finalize_coalesce_time {
+                                    t.add_duration(t_iter.elapsed());
+                                }
+                                continue;
+                            }
                             Ok(PushBatchStatus::LimitReached) => {
                                 if !self.coalescer_finished {
                                     if let Err(e) = self.batch_coalescer.finish() {
@@ -797,12 +907,22 @@ impl IndexedStream {
                                     self.coalescer_finished = true;
                                 }
                                 self.upstream_done = true;
+                                if let Some(ref t) = self.metrics.dbg_finalize_coalesce_time {
+                                    t.add_duration(t_iter.elapsed());
+                                }
                                 continue;
                             }
                             Err(e) => return Poll::Ready(Some(Err(e))),
                         }
                     }
-                    Poll::Ready(Some(Ok(_))) => continue,
+                    Poll::Ready(Some(Ok(_))) => {
+                        // Empty parquet batch — counts as finalize/coalesce
+                        // work for breakdown purposes.
+                        if let Some(ref t) = self.metrics.dbg_finalize_coalesce_time {
+                            t.add_duration(t_iter.elapsed());
+                        }
+                        continue;
+                    }
                     Poll::Ready(Some(Err(e))) => return Poll::Ready(Some(Err(e))),
                     Poll::Ready(None) => {
                         // Stream finished — collect inner parquet metrics
@@ -821,14 +941,23 @@ impl IndexedStream {
                         self.current_position_map = None;
                         self.mask_offset = 0;
                         self.batch_offset = 0;
+                        // RG fully drained + per-RG state reset — attribute
+                        // to finalize_coalesce (the wind-down of a row group).
+                        if let Some(ref t) = self.metrics.dbg_finalize_coalesce_time {
+                            t.add_duration(t_iter.elapsed());
+                        }
                     }
-                    Poll::Pending => return Poll::Pending,
+                    Poll::Pending => {
+                        if let Some(ref t) = self.metrics.dbg_parquet_pending_time { t.add_duration(t_iter.elapsed()); }
+                        return Poll::Pending;
+                    }
                 }
             }
 
             if self.finished {
                 // Upstream fully consumed; let the coalescer flush.
                 self.upstream_done = true;
+                if let Some(ref t) = self.metrics.dbg_emit_time { t.add_duration(t_iter.elapsed()); }
                 continue;
             }
 
@@ -1012,6 +1141,7 @@ impl IndexedStream {
                             };
                             self.mask_offset = 0;
                             self.current_position_map = Some(position_map);
+                            if let Some(ref t) = self.metrics.dbg_rg_setup_time { t.add_duration(t_iter.elapsed()); }
                         }
                         Err(e) => return Poll::Ready(Some(Err(e))),
                     }
@@ -1019,10 +1149,14 @@ impl IndexedStream {
                 Poll::Ready(Ok(None)) => {
                     self.finished = true;
                     self.upstream_done = true;
+                    if let Some(ref t) = self.metrics.dbg_rg_setup_time { t.add_duration(t_iter.elapsed()); }
                     continue;
                 }
                 Poll::Ready(Err(e)) => return Poll::Ready(Some(Err(e))),
-                Poll::Pending => return Poll::Pending,
+                Poll::Pending => {
+                    if let Some(ref t) = self.metrics.dbg_rg_poll_pending_time { t.add_duration(t_iter.elapsed()); }
+                    return Poll::Pending;
+                }
             }
         }
     }
