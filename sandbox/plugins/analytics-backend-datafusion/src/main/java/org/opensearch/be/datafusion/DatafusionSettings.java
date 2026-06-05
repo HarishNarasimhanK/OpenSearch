@@ -442,18 +442,9 @@ public final class DatafusionSettings {
      * Otherwise caps the value at 100% of available CPU cores.
      */
     private static int deriveTargetPartitions(String mode, int maxSliceCount) {
-        if (SearchService.CONCURRENT_SEGMENT_SEARCH_MODE_NONE.equals(mode)) {
-            return 1;
-        }
-
-        // For maxSliceCount == 0 also, we will be owning the concurrency level
-        if (maxSliceCount == 0) {
-            return Runtime.getRuntime().availableProcessors() / 2;
-        }
-
-        // Even if the user set's a higher value, we will still want to limit the number
-        // of slices to the number of available processors
-        // to avoid over-subscription and ensure reasonable performance
-        return Math.min(maxSliceCount, Runtime.getRuntime().availableProcessors());
+        // DEBUG (fixstats): force single partition so the whole query runs as
+        // one IndexedStream and the [stream-drop] breakdown is a single line,
+        // not split across partitions. Do NOT carry to main.
+        return 1;
     }
 }

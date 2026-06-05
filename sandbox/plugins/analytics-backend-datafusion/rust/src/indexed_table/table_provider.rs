@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: Apache-2.0
  *
  * The OpenSearch Contributors require contributions made to
- * this file be licensed under the Apache-2.0 license or a
+ * this file be licensed under the Aache-2.0 license or a
  * compatible open source license.
  */
 
@@ -487,6 +487,7 @@ impl ExecutionPlan for QueryShardExec {
         Ok(Box::pin(AccumulatingStream {
             inner,
             stream_metrics: stream_metrics_for_drop,
+            created_at: std::time::Instant::now(),
         }))
     }
 }
@@ -494,6 +495,10 @@ impl ExecutionPlan for QueryShardExec {
 struct AccumulatingStream {
     inner: SendableRecordBatchStream,
     stream_metrics: StreamMetrics,
+    /// Wall-clock start of the stream's lifetime. Used at Drop to report
+    /// the total wall time (active poll work + parked/idle), which is the
+    /// correct denominator for "is the hot path fully accounted".
+    created_at: std::time::Instant,
 }
 
 impl Stream for AccumulatingStream {
@@ -512,6 +517,53 @@ impl RecordBatchStream for AccumulatingStream {
 
 impl Drop for AccumulatingStream {
     fn drop(&mut self) {
+        // Debug: print the timing breakdown and how much of the stream's
+        // wall-clock lifetime is accounted for. No new partition metrics —
+        // just reads what we already record, plus the stream wall-clock.
+        let m = &self.stream_metrics;
+        use datafusion::physical_plan::metrics::Time;
+        let to_ms = |t: &Option<Time>| -> f64 {
+            t.as_ref().map_or(0usize, |v| v.value()) as f64 / 1_000_000.0
+        };
+        let wall = self.created_at.elapsed().as_nanos() as f64 / 1_000_000.0;
+        let elapsed = to_ms(&m.elapsed_compute);
+        let parquet_poll = to_ms(&m.parquet_poll_time);
+        let parquet_time = to_ms(&m.parquet_time);
+        let on_batch_mask = to_ms(&m.on_batch_mask_time);
+        let build_mask = to_ms(&m.build_mask_time);
+        let filter_rb = to_ms(&m.filter_record_batch_time);
+        let prefetch_wait = to_ms(&m.prefetch_wait_time);
+        // index_time = total Lucene/index collection time: sum of each RG's
+        // evaluator eval_nanos (the FFM upcall into Lucene + bitset build).
+        // This is the "overall Lucene collection time" metric; it runs on the
+        // background prefetch thread, overlapped with the hot path.
+        let index_time = to_ms(&m.index_time);
+        // Two coverages:
+        //  - fg_pct: foreground in-poll work vs elapsed_compute (active poll time).
+        //  - hot_pct: (active poll work + prefetch parked-wait) vs wall-clock
+        //    lifetime. prefetch_wait lives OUTSIDE elapsed_compute (the future
+        //    is parked while blocked on the prefetch), so it belongs against
+        //    wall, not elapsed.
+        let fg = parquet_poll + parquet_time + on_batch_mask + build_mask + filter_rb;
+        let fg_pct = if elapsed > 0.0 { fg / elapsed * 100.0 } else { 0.0 };
+        let hot = elapsed + prefetch_wait;
+        let hot_pct = if wall > 0.0 { hot / wall * 100.0 } else { 0.0 };
+        native_bridge_common::log_info!(
+            "[stream-drop] wall={:.3}ms elapsed={:.3}ms prefetch_wait={:.3}ms index_time={:.3}ms | parquet_poll={:.3}ms parquet_time={:.3}ms on_batch_mask={:.3}ms build_mask={:.3}ms filter_rb={:.3}ms | fg={:.3}ms fg_pct={:.1}% (of elapsed) | hot={:.3}ms hot_pct={:.1}% (of wall)",
+            wall,
+            elapsed,
+            prefetch_wait,
+            index_time,
+            parquet_poll,
+            parquet_time,
+            on_batch_mask,
+            build_mask,
+            filter_rb,
+            fg,
+            fg_pct,
+            hot,
+            hot_pct,
+        );
         crate::search_stats::accumulate(&self.stream_metrics);
     }
 }
