@@ -100,8 +100,15 @@ pub struct StreamMetrics {
     /// Time spent polling the inner parquet stream (pull decoded
     /// batch), isolating decode from our own processing.
     pub parquet_poll_time: Option<Time>,
+    /// Time spent in the one-time `index_reader.init_prefetch()` call
+    /// (kicks off the first row group's prefetch). Runs inside the first
+    /// poll, so it's part of `elapsed_compute`.
+    pub init_prefetch_time: Option<Time>,
     /// Accumulated inner `DataSourceExec` parquet metrics (shared across partitions).
     pub inner_parquet_metrics: Option<Arc<std::sync::Mutex<Vec<MetricsSet>>>>,
+    /// Cumulative time between poll_next calls — the time the stream is NOT
+    /// being polled (scheduling, upstream operator processing, chunk transitions).
+    pub inter_poll_gap: Option<Time>,
 }
 
 impl StreamMetrics {
@@ -139,7 +146,9 @@ impl StreamMetrics {
             mask_slice_time: None,
             projection_fixup_time: None,
             parquet_poll_time: None,
+            init_prefetch_time: None,
             inner_parquet_metrics: None,
+            inter_poll_gap: None,
         }
     }
 }
@@ -177,6 +186,8 @@ pub struct PartitionMetrics {
     pub mask_slice_time: Time,
     pub projection_fixup_time: Time,
     pub parquet_poll_time: Time,
+    pub init_prefetch_time: Time,
+    pub inter_poll_gap: Time,
 }
 
 impl PartitionMetrics {
@@ -219,6 +230,9 @@ impl PartitionMetrics {
                 .subset_time("projection_fixup_time", partition),
             parquet_poll_time: MetricBuilder::new(metrics)
                 .subset_time("parquet_poll_time", partition),
+            init_prefetch_time: MetricBuilder::new(metrics)
+                .subset_time("init_prefetch_time", partition),
+            inter_poll_gap: MetricBuilder::new(metrics).subset_time("inter_poll_gap", partition),
         }
     }
 
@@ -259,7 +273,9 @@ impl PartitionMetrics {
             mask_slice_time: Some(self.mask_slice_time),
             projection_fixup_time: Some(self.projection_fixup_time),
             parquet_poll_time: Some(self.parquet_poll_time),
+            init_prefetch_time: Some(self.init_prefetch_time),
             inner_parquet_metrics,
+            inter_poll_gap: Some(self.inter_poll_gap),
         }
     }
 }

@@ -42,8 +42,11 @@ public class DatafusionSearchExecEngine implements SearchExecEngine<ShardScanExe
         datafusionContext.setDatafusionQuery(new DatafusionQuery(requestContext.getTableName(), substraitBytes, contextId));
     }
 
+    private static final org.apache.logging.log4j.Logger logger = org.apache.logging.log4j.LogManager.getLogger(DatafusionSearchExecEngine.class);
+
     @Override
     public EngineResultStream execute(ShardScanExecutionContext requestContext) throws IOException {
+        long t0 = System.nanoTime();
         BufferAllocator allocator = requestContext.getAllocator();
         if (allocator == null) {
             throw new IllegalStateException("ExecutionContext.allocator must be set by the caller before execute()");
@@ -57,10 +60,18 @@ public class DatafusionSearchExecEngine implements SearchExecEngine<ShardScanExe
             shardTask.setCancellationListener(() -> NativeBridge.cancelQuery(contextId));
         }
 
+        long tSearch = System.nanoTime();
         DatafusionSearcher searcher = datafusionContext.getSearcher();
         searcher.search(datafusionContext);
+        long searchElapsed = System.nanoTime() - tSearch;
+
         StreamHandle handle = datafusionContext.takeStreamHandle();
-        return new DatafusionResultStream(handle, allocator);
+        DatafusionResultStream resultStream = new DatafusionResultStream(handle, allocator);
+        logger.info("[DatafusionSearchExecEngine::execute] time for searcher.search (FFM plan setup): {} ms | time for entire execute(): {} ms | contextId={}",
+            String.format("%.3f", searchElapsed / 1_000_000.0),
+            String.format("%.3f", (System.nanoTime() - t0) / 1_000_000.0),
+            contextId);
+        return resultStream;
     }
 
     @Override

@@ -900,33 +900,52 @@ pub unsafe fn stream_get_schema(stream_ptr: i64) -> Result<i64, DataFusionError>
 pub async unsafe fn stream_next(
     stream_ptr: i64,
 ) -> Result<i64, DataFusionError> {
+    let t_total = std::time::Instant::now();
     let handle = &mut *(stream_ptr as *mut QueryStreamHandle);
     let token = query_tracker::get_cancellation_token(handle._query_tracking_context.context_id());
 
     // Fetch the next batch (cancellation-aware)
+    let t_poll = std::time::Instant::now();
     let result = cancellation::cancellable_or(
         token.as_ref(),
         None,
         async { handle.stream.try_next().await.map_err(|e: DataFusionError| e) },
     ).await
     .map_err(|e| DataFusionError::Execution(e))?;
+    let poll_elapsed = t_poll.elapsed();
 
     match result {
         Some(batch) => {
             // Apply pending phantom correction from the self-correcting budget.
             handle._query_tracking_context.apply_pending_phantom_correction();
 
+            let t_serialize = std::time::Instant::now();
             let batch = if handle.has_views {
                 compact_string_view_columns(batch)
             } else {
                 batch
             };
+            let num_rows = batch.num_rows();
             let struct_array: StructArray = batch.into();
             let array_data = struct_array.into_data();
             let ffi_array = FFI_ArrowArray::new(&array_data);
+            native_bridge_common::log_info!(
+                "[stream_next] time for try_next().await (poll): {:.3}ms | time for batch serialize to FFI: {:.3}ms | rows={} total={:.3}ms",
+                poll_elapsed.as_nanos() as f64 / 1_000_000.0,
+                t_serialize.elapsed().as_nanos() as f64 / 1_000_000.0,
+                num_rows,
+                t_total.elapsed().as_nanos() as f64 / 1_000_000.0
+            );
             Ok(Box::into_raw(Box::new(ffi_array)) as i64)
         }
-        None => Ok(0),
+        None => {
+            native_bridge_common::log_info!(
+                "[stream_next] stream exhausted: poll={:.3}ms total={:.3}ms",
+                poll_elapsed.as_nanos() as f64 / 1_000_000.0,
+                t_total.elapsed().as_nanos() as f64 / 1_000_000.0
+            );
+            Ok(0)
+        }
     }
 }
 

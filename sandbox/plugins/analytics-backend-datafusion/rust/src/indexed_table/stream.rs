@@ -455,6 +455,8 @@ struct IndexedStream {
     emit_row_ids: bool,
     /// Index in the output schema where computed `___row_id` is inserted.
     row_id_output_index: Option<usize>,
+    /// Timestamp of the last poll_next return — used to measure inter-poll gap.
+    last_poll_ended: Option<Instant>,
 }
 
 impl IndexedStream {
@@ -518,6 +520,7 @@ impl IndexedStream {
             global_base,
             emit_row_ids,
             row_id_output_index,
+            last_poll_ended: None,
         }
     }
 
@@ -702,9 +705,19 @@ impl Stream for IndexedStream {
         // time downstream work.
         let poll_start = Instant::now();
 
+        if let Some(last_ended) = self.last_poll_ended {
+            if let Some(ref t) = self.metrics.inter_poll_gap {
+                t.add_duration(poll_start.duration_since(last_ended));
+            }
+        }
+
         if !self.initialized {
+            let t_init = Instant::now();
             self.index_reader.init_prefetch();
             self.initialized = true;
+            if let Some(ref t) = self.metrics.init_prefetch_time {
+                t.add_duration(t_init.elapsed());
+            }
         }
 
         let result = self.as_mut().poll_inner(cx);
@@ -712,6 +725,7 @@ impl Stream for IndexedStream {
         if let Some(ref t) = self.metrics.elapsed_compute {
             t.add_duration(poll_start.elapsed());
         }
+        self.last_poll_ended = Some(Instant::now());
         result
     }
 }

@@ -357,7 +357,6 @@ public class AnalyticsSearchService implements AutoCloseable {
         try {
             ShardScanExecutionContext ctx = buildContext(request, readerContext.getReader(), resolved.plan, shard, task);
             AnalyticsSearchBackendPlugin backend = backends.get(resolved.plan.getBackendId());
-
             backendContext = applyInstructionHandlers(backend, resolved.plan.getInstructions(), ctx);
 
             // Handle exchange — if plan has delegation, ask accepting backend for handle and pass to driving

@@ -396,9 +396,16 @@ impl ExecutionPlan for QueryShardExec {
         partition: usize,
         context: Arc<datafusion::execution::TaskContext>,
     ) -> Result<SendableRecordBatchStream> {
+        let t_execute = std::time::Instant::now();
+
         let assignment = self.assignments.get(partition).ok_or_else(|| {
             DataFusionError::Internal(format!("partition {} out of range", partition))
         })?;
+
+        native_bridge_common::log_info!(
+            "[QueryShardExec::execute] starting execution: partition={} num_chunks={}",
+            partition, assignment.chunks.len()
+        );
 
         let pmetrics = PartitionMetrics::new(&self.metrics, partition);
         let stream_metrics =
@@ -413,7 +420,8 @@ impl ExecutionPlan for QueryShardExec {
         // already serialized within one partition assignment.
         let mut streams: Vec<SendableRecordBatchStream> =
             Vec::with_capacity(assignment.chunks.len());
-        for chunk in &assignment.chunks {
+        for (chunk_idx, chunk) in assignment.chunks.iter().enumerate() {
+            let t_chunk = std::time::Instant::now();
             let segment = self.config.segments.get(chunk.segment_idx).ok_or_else(|| {
                 DataFusionError::Internal(format!("segment_idx {} out of range", chunk.segment_idx))
             })?;
@@ -428,12 +436,22 @@ impl ExecutionPlan for QueryShardExec {
                 .collect();
 
             if row_groups.is_empty() {
+                native_bridge_common::log_info!(
+                    "[QueryShardExec::execute] chunk has no row_groups, skipping: partition={} chunk_idx={}",
+                    partition, chunk_idx
+                );
                 continue;
             }
 
+            let t_eval = std::time::Instant::now();
             // Build evaluator for this chunk.
             let evaluator = (self.config.evaluator_factory)(segment, chunk, &stream_metrics)
                 .map_err(|e| DataFusionError::External(e.into()))?;
+            native_bridge_common::log_info!(
+                "[QueryShardExec::execute] time for evaluator_factory(): partition={} chunk_idx={} num_row_groups={} doc_range=[{},{}] elapsed={:.3}ms",
+                partition, chunk_idx, row_groups.len(), chunk.doc_min, chunk.doc_max,
+                t_eval.elapsed().as_nanos() as f64 / 1_000_000.0
+            );
 
             let props = Arc::new(PlanProperties::new(
                 EquivalenceProperties::new(self.projected_schema.clone()),
@@ -463,7 +481,15 @@ impl ExecutionPlan for QueryShardExec {
                 emit_row_ids: self.config.emit_row_ids,
                 row_id_output_index: self.row_id_output_index,
             };
+
+            let t_exec = std::time::Instant::now();
             streams.push(exec.execute(0, Arc::clone(&context))?);
+            native_bridge_common::log_info!(
+                "[QueryShardExec::execute] time for IndexedExec::execute (creates IndexedStream): partition={} chunk_idx={} elapsed={:.3}ms chunk_total={:.3}ms",
+                partition, chunk_idx,
+                t_exec.elapsed().as_nanos() as f64 / 1_000_000.0,
+                t_chunk.elapsed().as_nanos() as f64 / 1_000_000.0
+            );
         }
 
         // Chain the per-chunk streams into one stream for this partition
@@ -471,6 +497,10 @@ impl ExecutionPlan for QueryShardExec {
         // CoalescePartitionsExec wrapping that re-shaped partitioning).
         let inner: SendableRecordBatchStream = match streams.len() {
             0 => {
+                native_bridge_common::log_info!(
+                    "[QueryShardExec::execute] all chunks empty, using EmptyExec: partition={}",
+                    partition
+                );
                 let empty = datafusion::physical_plan::empty::EmptyExec::new(
                     self.projected_schema.clone(),
                 );
@@ -483,6 +513,13 @@ impl ExecutionPlan for QueryShardExec {
                 Box::pin(RecordBatchStreamAdapter::new(schema, chained))
             }
         };
+
+        native_bridge_common::log_info!(
+            "[QueryShardExec::execute] time for entire execute(): partition={} num_streams={} elapsed={:.3}ms",
+            partition, assignment.chunks.len(),
+            t_execute.elapsed().as_nanos() as f64 / 1_000_000.0
+        );
+
         // Wrap so the Drop impl flushes search_stats for this query.
         Ok(Box::pin(AccumulatingStream {
             inner,
@@ -497,7 +534,7 @@ struct AccumulatingStream {
     stream_metrics: StreamMetrics,
     /// Wall-clock start of the stream's lifetime. Used at Drop to report
     /// the total wall time (active poll work + parked/idle), which is the
-    /// correct denominator for "is the hot path fully accounted".
+    /// correct denominator for "is the hot path fully accfsounted".
     created_at: std::time::Instant,
 }
 
@@ -538,31 +575,28 @@ impl Drop for AccumulatingStream {
         // This is the "overall Lucene collection time" metric; it runs on the
         // background prefetch thread, overlapped with the hot path.
         let index_time = to_ms(&m.index_time);
-        // Two coverages:
-        //  - fg_pct: foreground in-poll work vs elapsed_compute (active poll time).
-        //  - hot_pct: (active poll work + prefetch parked-wait) vs wall-clock
-        //    lifetime. prefetch_wait lives OUTSIDE elapsed_compute (the future
-        //    is parked while blocked on the prefetch), so it belongs against
-        //    wall, not elapsed.
-        let fg = parquet_poll + parquet_time + on_batch_mask + build_mask + filter_rb;
+        let init_prefetch = to_ms(&m.init_prefetch_time);
+        let inter_poll_gap = to_ms(&m.inter_poll_gap);
+        // fg_pct: foreground in-poll work vs elapsed_compute (active poll time).
+        // init_prefetch runs inside the first poll (so inside elapsed_compute),
+        // so it's part of the fg sum.
+        let fg = parquet_poll + parquet_time + on_batch_mask + build_mask + filter_rb + init_prefetch;
         let fg_pct = if elapsed > 0.0 { fg / elapsed * 100.0 } else { 0.0 };
-        let hot = elapsed + prefetch_wait;
-        let hot_pct = if wall > 0.0 { hot / wall * 100.0 } else { 0.0 };
         native_bridge_common::log_info!(
-            "[stream-drop] wall={:.3}ms elapsed={:.3}ms prefetch_wait={:.3}ms index_time={:.3}ms | parquet_poll={:.3}ms parquet_time={:.3}ms on_batch_mask={:.3}ms build_mask={:.3}ms filter_rb={:.3}ms | fg={:.3}ms fg_pct={:.1}% (of elapsed) | hot={:.3}ms hot_pct={:.1}% (of wall)",
+            "[stream-drop] wall={:.3}ms elapsed={:.3}ms prefetch_wait={:.3}ms inter_poll_gap={:.3}ms index_time={:.3}ms | parquet_poll={:.3}ms parquet_time={:.3}ms on_batch_mask={:.3}ms build_mask={:.3}ms filter_rb={:.3}ms init_prefetch={:.3}ms | fg={:.3}ms fg_pct={:.1}% (of elapsed)",
             wall,
             elapsed,
             prefetch_wait,
+            inter_poll_gap,
             index_time,
             parquet_poll,
             parquet_time,
             on_batch_mask,
             build_mask,
             filter_rb,
+            init_prefetch,
             fg,
             fg_pct,
-            hot,
-            hot_pct,
         );
         crate::search_stats::accumulate(&self.stream_metrics);
     }

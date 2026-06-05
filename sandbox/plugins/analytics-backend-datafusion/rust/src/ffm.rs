@@ -226,12 +226,19 @@ pub unsafe extern "C" fn df_execute_query(
     // Pointer to a `WireDatafusionQueryConfig`
     query_config_ptr: i64,
 ) -> i64 {
+    let t_e2e = std::time::Instant::now();
     let mgr = get_rt_manager()?;
     let table_name = str_from_raw(table_name_ptr, table_name_len)
         .map_err(|e| format!("df_execute_query: {}", e))?;
     let plan_bytes = slice::from_raw_parts(plan_ptr, plan_len as usize);
     let query_config =
         crate::datafusion_query_config::DatafusionQueryConfig::from_ffm_ptr(query_config_ptr);
+
+    native_bridge_common::log_info!(
+        "[df_execute_query] table={} plan_len={} context_id={}",
+        table_name, plan_len, context_id
+    );
+
     // Copy the plan bytes so the spawned future can own them (`cpu_executor.spawn`
     // requires `'static`). The `shard_view_ptr`, `runtime_ptr` are raw pointers
     // held live by the caller for the duration of the FFM downcall — safe to
@@ -249,7 +256,7 @@ pub unsafe extern "C" fn df_execute_query(
     // all the work. The IO runtime still drives the outer `timed_block_on`
     // (bridging the synchronous FFM call to the async spawn handle); only
     // the plan construction and stream wrapping hop to CPU.
-    timed_block_on(&mgr.io_runtime, "execute_query", async move {
+    let result = timed_block_on(&mgr.io_runtime, "execute_query", async move {
         let inner_fut = crate::task_monitors::query_execution_monitor().instrument(async move {
             api::execute_query(
                 shard_view_ptr,
@@ -269,7 +276,14 @@ pub unsafe extern "C" fn df_execute_query(
             ))),
         }
     })
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string());
+
+    native_bridge_common::log_info!(
+        "[df_execute_query] done: e2e={:.3}ms success={}",
+        t_e2e.elapsed().as_nanos() as f64 / 1_000_000.0,
+        result.is_ok()
+    );
+    result
 }
 
 /// Fetch specific rows by global row ID — QTF fetch phase.
@@ -342,9 +356,16 @@ pub unsafe extern "C" fn df_stream_get_schema(stream_ptr: i64) -> i64 {
 #[ffm_safe]
 #[no_mangle]
 pub unsafe extern "C" fn df_stream_next(stream_ptr: i64) -> i64 {
+    let t = std::time::Instant::now();
     let mgr = get_rt_manager()?;
-    timed_block_on(&mgr.io_runtime, "stream_next", crate::task_monitors::stream_next_monitor().instrument(api::stream_next(stream_ptr)))
-        .map_err(|e| e.to_string())
+    let result = timed_block_on(&mgr.io_runtime, "stream_next", crate::task_monitors::stream_next_monitor().instrument(api::stream_next(stream_ptr)))
+        .map_err(|e| e.to_string());
+    native_bridge_common::log_info!(
+        "[df_stream_next] elapsed={:.3}ms success={}",
+        t.elapsed().as_nanos() as f64 / 1_000_000.0,
+        result.is_ok()
+    );
+    result
 }
 
 #[no_mangle]
@@ -955,9 +976,23 @@ pub unsafe extern "C" fn df_execute_with_context(
     plan_ptr: *const u8,
     plan_len: i64,
 ) -> i64 {
-    let session_handle = *Box::from_raw(session_ctx_ptr as *mut crate::session_context::SessionContextHandle);
+    let t_e2e = std::time::Instant::now();
 
+    let t_step = std::time::Instant::now();
+    let session_handle = *Box::from_raw(session_ctx_ptr as *mut crate::session_context::SessionContextHandle);
+    native_bridge_common::log_info!(
+        "[df_execute_with_context] time for unboxing session_handle from raw ptr: elapsed={:.3}ms",
+        t_step.elapsed().as_nanos() as f64 / 1_000_000.0
+    );
+
+    let t_step = std::time::Instant::now();
     let mgr = get_rt_manager()?;
+    native_bridge_common::log_info!(
+        "[df_execute_with_context] time for get_rt_manager: elapsed={:.3}ms",
+        t_step.elapsed().as_nanos() as f64 / 1_000_000.0
+    );
+
+    let t_step = std::time::Instant::now();
     let plan_bytes = slice::from_raw_parts(plan_ptr, plan_len as usize);
     let cpu_executor = mgr.cpu_executor();
     // See `df_execute_query` for the rationale behind wrapping the inner
@@ -968,6 +1003,10 @@ pub unsafe extern "C" fn df_execute_with_context(
     let plan_vec = plan_bytes.to_vec();
     let cpu_for_cross = cpu_executor.clone();
     let mgr_for_spawn = Arc::clone(&mgr);
+    native_bridge_common::log_info!(
+        "[df_execute_with_context] time for plan_bytes + cpu_executor + clones: plan_len={} elapsed={:.3}ms",
+        plan_len, t_step.elapsed().as_nanos() as f64 / 1_000_000.0
+    );
 
     // Route based on whether the session was configured for indexed execution,
     // or if the plan projects __row_id__ (QTF query phase) under a non-ListingTable
@@ -978,19 +1017,33 @@ pub unsafe extern "C" fn df_execute_with_context(
     let query_strategy = session_handle.query_config.query_strategy;
     let use_indexed = session_handle.indexed_config.is_some()
         || (has_row_id && query_strategy != crate::datafusion_query_config::QueryStrategy::ListingTable);
+
+    native_bridge_common::log_info!(
+        "[df_execute_with_context] plan_len={} use_indexed={} query_strategy={:?} has_row_id={}",
+        plan_len, use_indexed, query_strategy, has_row_id
+    );
+
     if use_indexed {
         // Extract target_partitions BEFORE boxing into raw pointer (session_handle is consumed).
         let partition_weight = session_handle.query_config.target_partitions.max(1) as u32;
         // TODO: refactor execute_indexed_with_context to take SessionContextHandle directly
         let ptr = Box::into_raw(Box::new(session_handle)) as i64;
-        mgr.io_runtime
+
+        let result = mgr.io_runtime
             .block_on(async move {
+                let t_gate = std::time::Instant::now();
                 // Acquire datanode gate on IO runtime BEFORE spawning on CPU.
                 // This blocks the IO thread (and thus the Java search thread),
                 // creating backpressure at the Java threadpool level when the gate is full.
                 let gate = mgr_for_spawn.cpu_executor().concurrency_gate().clone();
                 let max_p = gate.max_permits();
                 let permit = gate.acquire_many(partition_weight.min(max_p)).await;
+                let gate_wait_ms = t_gate.elapsed().as_nanos() as f64 / 1_000_000.0;
+
+                native_bridge_common::log_info!(
+                    "[df_execute_with_context] gate_acquired: gate_wait={:.3}ms max_permits={} partition_weight={}",
+                    gate_wait_ms, max_p, partition_weight
+                );
 
                 let inner_fut = crate::task_monitors::query_execution_monitor().instrument(async move {
                     crate::indexed_executor::execute_indexed_with_context(
@@ -1007,18 +1060,33 @@ pub unsafe extern "C" fn df_execute_with_context(
                     ))),
                 }
             })
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string());
+
+        native_bridge_common::log_info!(
+            "[df_execute_with_context] done: path=indexed e2e={:.3}ms success={}",
+            t_e2e.elapsed().as_nanos() as f64 / 1_000_000.0,
+            result.is_ok()
+        );
+        result
     } else {
         // Extract target_partitions before moving session_handle into the closure.
         let partition_weight = session_handle.query_config.target_partitions.max(1) as u32;
-        mgr.io_runtime
+
+        let result = mgr.io_runtime
             .block_on(async move {
+                let t_gate = std::time::Instant::now();
                 // Acquire datanode gate on IO runtime BEFORE spawning on CPU.
                 // This blocks the IO thread (and thus the Java search thread),
                 // creating backpressure at the Java threadpool level when the gate is full.
                 let gate = mgr_for_spawn.cpu_executor().concurrency_gate().clone();
                 let max_p = gate.max_permits();
                 let permit = gate.acquire_many(partition_weight.min(max_p)).await;
+                let gate_wait_ms = t_gate.elapsed().as_nanos() as f64 / 1_000_000.0;
+
+                native_bridge_common::log_info!(
+                    "[df_execute_with_context] gate_acquired: gate_wait={:.3}ms max_permits={} partition_weight={}",
+                    gate_wait_ms, max_p, partition_weight
+                );
 
                 let inner_fut = crate::task_monitors::query_execution_monitor().instrument(async move {
                     crate::query_executor::execute_with_context(
@@ -1036,7 +1104,14 @@ pub unsafe extern "C" fn df_execute_with_context(
                     ))),
                 }
             })
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string());
+
+        native_bridge_common::log_info!(
+            "[df_execute_with_context] done: path=listing e2e={:.3}ms success={}",
+            t_e2e.elapsed().as_nanos() as f64 / 1_000_000.0,
+            result.is_ok()
+        );
+        result
     }
 }
 

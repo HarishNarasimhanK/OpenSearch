@@ -12,6 +12,8 @@ import org.apache.arrow.c.ArrowArray;
 import org.apache.arrow.c.ArrowSchema;
 import org.apache.arrow.c.CDataDictionaryProvider;
 import org.apache.arrow.c.Data;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.FieldVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
@@ -44,10 +46,13 @@ import static org.apache.arrow.c.Data.importField;
 @ExperimentalApi
 public class DatafusionResultStream implements EngineResultStream {
 
+    private static final Logger logger = LogManager.getLogger(DatafusionResultStream.class);
+
     private final StreamHandle streamHandle;
     private final BufferAllocator allocator;
     private final CDataDictionaryProvider dictionaryProvider;
     private volatile BatchIterator iteratorInstance;
+
 
     // Allocator is caller-owned; this stream imports into it but never closes it.
     public DatafusionResultStream(StreamHandle streamHandle, BufferAllocator allocator) {
@@ -91,6 +96,8 @@ public class DatafusionResultStream implements EngineResultStream {
         private Boolean nextAvailable;
         private boolean batchEmitted;
         private boolean nativeStreamExhausted;
+        private int batchCount;
+        private long cumulativeStreamNextNanos;
 
         BatchIterator(StreamHandle streamHandle, BufferAllocator allocator, CDataDictionaryProvider dictionaryProvider) {
             this.streamHandle = streamHandle;
@@ -113,11 +120,17 @@ public class DatafusionResultStream implements EngineResultStream {
         private boolean loadNextBatch() {
             ensureSchema();
             if (nativeStreamExhausted) return false;
+            long t0 = System.nanoTime();
             long arrayAddr = callNativeFn(
                 listener -> NativeBridge.streamNext(streamHandle.getRuntimeHandle().get(), streamHandle.getPointer(), listener)
             );
+            long streamNextElapsed = System.nanoTime() - t0;
+            cumulativeStreamNextNanos += streamNextElapsed;
+            batchCount++;
             if (arrayAddr == 0) {
                 nativeStreamExhausted = true;
+                logger.info("[loadNextBatch] stream exhausted: total_batches={} cumulative_stream_next={} ms",
+                    batchCount, String.format("%.3f", cumulativeStreamNextNanos / 1_000_000.0));
                 // Streaming Flight requires ≥1 schema-bearing frame before completeStream;
                 // synthesise a zero-row batch carrying the schema for empty native streams.
                 if (!batchEmitted) {
@@ -128,6 +141,9 @@ public class DatafusionResultStream implements EngineResultStream {
                 }
                 return false;
             }
+            logger.info("[loadNextBatch] time for NativeBridge.streamNext (batch #{}): elapsed={} ms cumulative={} ms",
+                batchCount, String.format("%.3f", streamNextElapsed / 1_000_000.0),
+                String.format("%.3f", cumulativeStreamNextNanos / 1_000_000.0));
             VectorSchemaRoot freshRoot = VectorSchemaRoot.create(schema, allocator);
             try (ArrowArray arrowArray = ArrowArray.wrap(arrayAddr)) {
                 Data.importIntoVectorSchemaRoot(allocator, arrowArray, freshRoot, dictionaryProvider);

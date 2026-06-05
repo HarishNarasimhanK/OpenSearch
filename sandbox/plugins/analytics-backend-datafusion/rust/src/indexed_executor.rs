@@ -440,10 +440,26 @@ pub async unsafe fn execute_indexed_with_context(
     let context_id = handle.query_context.context_id();
     let token = crate::query_tracker::get_cancellation_token(context_id);
 
+    native_bridge_common::log_info!(
+        "[execute_indexed_with_context] start: context_id={}",
+        context_id
+    );
+
+    // Time the whole plan-setup phase: decode substrait, build segments,
+    // construct the IndexedTableProvider + physical plan, and create the
+    // stream handle. This returns BEFORE any batch is scanned (scanning
+    // happens later in df_stream_next), so this is the `plan_setup` term of
+    // the e2e breakdown: total = plan_setup + streaming_wall.
+    let plan_setup_start = std::time::Instant::now();
     let query_future = execute_indexed_with_context_inner(handle, substrait_bytes, cpu_executor, permit);
-    crate::cancellation::cancellable(token.as_ref(), context_id, query_future)
+    let result = crate::cancellation::cancellable(token.as_ref(), context_id, query_future)
         .await
-        .map_err(DataFusionError::Execution)
+        .map_err(DataFusionError::Execution);
+    native_bridge_common::log_info!(
+        "[execute_indexed_with_context] time for execute_indexed_with_context_inner (plan setup): context_id={} elapsed={:.3}ms success={}",
+        context_id, plan_setup_start.elapsed().as_nanos() as f64 / 1_000_000.0, result.is_ok()
+    );
+    result
 }
 
 async unsafe fn execute_indexed_with_context_inner(
@@ -452,7 +468,7 @@ async unsafe fn execute_indexed_with_context_inner(
     cpu_executor: DedicatedExecutor,
     permit: tokio::sync::OwnedSemaphorePermit,
 ) -> Result<i64, DataFusionError> {
-
+    let t_inner = std::time::Instant::now();
     // Permit was acquired by the caller (ffm.rs) on the IO runtime before
     // spawning on the CPU runtime, so the Java search thread blocks at the
     // gate when it is full — creating backpressure at the Java threadpool level.
@@ -460,19 +476,30 @@ async unsafe fn execute_indexed_with_context_inner(
     // Empty shard: skip build_segments (errors on zero files) and emit an
     // empty stream. Mirrors the guard in query_executor::execute_with_context.
     if handle.object_metas.is_empty() {
+        native_bridge_common::log_info!("[execute_indexed_with_context_inner] empty shard shortcut");
         use datafusion::physical_plan::empty::EmptyExec;
         use datafusion::physical_plan::ExecutionPlan;
         let context_id_early = handle.query_context.context_id();
+        let t_step = std::time::Instant::now();
         let plan = Plan::decode(substrait_bytes.as_slice())
             .map_err(|e| DataFusionError::Execution(format!("decode substrait: {}", e)))?;
         let logical_plan = from_substrait_plan(&handle.ctx.state(), &plan).await?;
+        native_bridge_common::log_info!(
+            "[execute_indexed_with_context_inner] time for Plan::decode + from_substrait_plan (empty): elapsed={:.3}ms",
+            t_step.elapsed().as_nanos() as f64 / 1_000_000.0
+        );
         let plan_schema: arrow::datatypes::SchemaRef =
             Arc::new(logical_plan.schema().as_arrow().clone());
         let plan_schema = crate::schema_coerce::coerce_inferred_schema(plan_schema);
         let empty_exec = EmptyExec::new(Arc::clone(&plan_schema));
+        let t_step = std::time::Instant::now();
         let df_stream = empty_exec.execute(0, handle.ctx.task_ctx())?;
         let (cross_rt_stream, abort_handle) =
             CrossRtStream::new_with_df_error_stream_cancellable(df_stream, cpu_executor);
+        native_bridge_common::log_info!(
+            "[execute_indexed_with_context_inner] time for empty_exec.execute + CrossRtStream wrap: elapsed={:.3}ms",
+            t_step.elapsed().as_nanos() as f64 / 1_000_000.0
+        );
         if let Some(h) = abort_handle {
             crate::query_tracker::set_abort_handle(context_id_early, h);
         }
@@ -485,6 +512,10 @@ async unsafe fn execute_indexed_with_context_inner(
             handle.query_context,
             handle.ctx,
             Some(permit),
+        );
+        native_bridge_common::log_info!(
+            "[execute_indexed_with_context_inner] empty shard done: total={:.3}ms",
+            t_inner.elapsed().as_nanos() as f64 / 1_000_000.0
         );
         return Ok(Box::into_raw(Box::new(stream_handle)) as i64);
     }
@@ -514,6 +545,11 @@ async unsafe fn execute_indexed_with_context_inner(
     // callback to the correct per-query FilterDelegationHandle and DelegationThreadTracker.
     let context_id = query_context.context_id();
 
+    native_bridge_common::log_info!(
+        "[execute_indexed_with_context_inner] time for unpacking handle fields: context_id={} table={} num_files={} classification={:?} elapsed={:.3}ms",
+        context_id, table_name, object_metas.len(), classification_override, t_inner.elapsed().as_nanos() as f64 / 1_000_000.0
+    );
+
     // SessionContext already has RuntimeEnv, caches, memory pool, UDF from create_session_context_indexed.
     // Deregister the default ListingTable (registered by create_session_context) — will be replaced
     // with IndexedTableProvider after plan decoding.
@@ -527,6 +563,7 @@ async unsafe fn execute_indexed_with_context_inner(
     let state = ctx.state();
     let metadata_cache = state.runtime_env().cache_manager.get_file_metadata_cache();
 
+    let t_step = std::time::Instant::now();
     let (segments, schema) = build_segments(
         &state,
         Arc::clone(&store),
@@ -539,15 +576,24 @@ async unsafe fn execute_indexed_with_context_inner(
     let schema = crate::schema_coerce::coerce_inferred_schema(schema);
     // Widen to the plan's base_schema so columns absent from this shard's parquet (cross-shard drift) are null-filled at read time.
     let schema = crate::session_context::widen_schema_from_plan(&ctx, &substrait_bytes, &table_name, &schema);
+    native_bridge_common::log_info!(
+        "[execute_indexed_with_context_inner] time for build_segments + schema coerce + widen: num_segments={} elapsed={:.3}ms",
+        segments.len(), t_step.elapsed().as_nanos() as f64 / 1_000_000.0
+    );
 
     let placeholder: Arc<dyn TableProvider> = Arc::new(PlaceholderProvider {
         schema: schema.clone(),
     });
     ctx.register_table(&table_name, placeholder)?;
 
+    let t_step = std::time::Instant::now();
     let plan = Plan::decode(substrait_bytes.as_slice())
         .map_err(|e| DataFusionError::Execution(format!("decode substrait: {}", e)))?;
     let logical_plan = from_substrait_plan(&ctx.state(), &plan).await?;
+    native_bridge_common::log_info!(
+        "[execute_indexed_with_context_inner] time for Plan::decode + from_substrait_plan: elapsed={:.3}ms",
+        t_step.elapsed().as_nanos() as f64 / 1_000_000.0
+    );
 
     let emit_row_ids = requests_row_ids;
     let filter_expr = extract_filter_expr(&logical_plan);
@@ -851,6 +897,11 @@ async unsafe fn execute_indexed_with_context_inner(
         }
     };
 
+    native_bridge_common::log_info!(
+        "[execute_indexed_with_context_inner] time for building evaluator_factory: classification={:?} elapsed={:.3}ms",
+        classification, t_inner.elapsed().as_nanos() as f64 / 1_000_000.0
+    );
+
     ctx.deregister_table(&table_name)?;
     // Extract the scheme+authority portion of the table URL for
     // DataFusion's FileScanConfig. The full URL includes the path
@@ -861,6 +912,7 @@ async unsafe fn execute_indexed_with_context_inner(
         .map_err(|e| DataFusionError::Execution(format!("parse table_path URL: {}", e)))?;
     let store_url = ObjectStoreUrl::parse(format!("{}://{}", parsed.scheme(), parsed.authority()))?;
 
+    let t_step = std::time::Instant::now();
     let provider = Arc::new(IndexedTableProvider::new(IndexedTableConfig {
         schema: schema.clone(),
         segments,
@@ -873,7 +925,12 @@ async unsafe fn execute_indexed_with_context_inner(
         emit_row_ids,
     }));
     ctx.register_table(&table_name, provider)?;
+    native_bridge_common::log_info!(
+        "[execute_indexed_with_context_inner] time for IndexedTableProvider::new + register_table: elapsed={:.3}ms",
+        t_step.elapsed().as_nanos() as f64 / 1_000_000.0
+    );
 
+    let t_step = std::time::Instant::now();
     let logical_plan = from_substrait_plan(&ctx.state(), &plan).await?;
     log_debug!("DataFusion logical plan:\n{}", logical_plan.display_indent());
     let dataframe = ctx.execute_logical_plan(logical_plan).await?;
@@ -885,6 +942,12 @@ async unsafe fn execute_indexed_with_context_inner(
     let target_schema = crate::schema_coerce::coerce_inferred_schema(physical_plan.schema());
     let physical_plan = crate::relabel_exec::wrap_if_relabel_needed(physical_plan, target_schema)?;
     log_debug!("DataFusion physical plan:\n{}", displayable(physical_plan.as_ref()).indent(true));
+    native_bridge_common::log_info!(
+        "[execute_indexed_with_context_inner] time for from_substrait + execute_logical_plan + create_physical_plan: elapsed={:.3}ms",
+        t_step.elapsed().as_nanos() as f64 / 1_000_000.0
+    );
+
+    let t_step = std::time::Instant::now();
     let df_stream = execute_stream(physical_plan, ctx.task_ctx())
         .map_err(|e| DataFusionError::Execution(format!("execute_stream: {}", e)))?;
 
@@ -898,5 +961,10 @@ async unsafe fn execute_indexed_with_context_inner(
     let schema = cross_rt_stream.schema();
     let wrapped = RecordBatchStreamAdapter::new(schema, cross_rt_stream);
     let stream_handle = crate::api::QueryStreamHandle::with_session_context(wrapped, query_context, ctx, Some(permit));
+    native_bridge_common::log_info!(
+        "[execute_indexed_with_context_inner] time for execute_stream + CrossRtStream wrap: elapsed={:.3}ms total_inner={:.3}ms",
+        t_step.elapsed().as_nanos() as f64 / 1_000_000.0,
+        t_inner.elapsed().as_nanos() as f64 / 1_000_000.0
+    );
     Ok(Box::into_raw(Box::new(stream_handle)) as i64)
 }
