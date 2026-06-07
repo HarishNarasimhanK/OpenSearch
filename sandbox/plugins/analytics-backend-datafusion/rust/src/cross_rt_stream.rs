@@ -75,11 +75,34 @@ impl CrossRtStream {
 
         let fut = async move {
             tokio::pin!(stream);
-            while let Some(res) = stream.next().await {
-                if tx_captured.send(res).await.is_err() {
-                    return;
+            // Producer-side accounting: `produce` = time the CPU runtime spends
+            // inside the plan poll generating a batch; `send` = time blocked
+            // handing it across the (depth-1) channel to the IO-runtime consumer.
+            // A large `send` means the consumer (Java/FFI drain) is the bottleneck
+            // and the channel can't run ahead; a large `produce` means the plan
+            // itself is slow. Logged once when the producer finishes.
+            let mut produce = std::time::Duration::ZERO;
+            let mut send = std::time::Duration::ZERO;
+            let mut batches: u64 = 0;
+            loop {
+                let p0 = std::time::Instant::now();
+                let next = stream.next().await;
+                produce += p0.elapsed();
+                let Some(res) = next else { break };
+                batches += 1;
+                let s0 = std::time::Instant::now();
+                let send_res = tx_captured.send(res).await;
+                send += s0.elapsed();
+                if send_res.is_err() {
+                    break;
                 }
             }
+            native_bridge_common::log_info!(
+                "[cross-rt-producer] batches={} produce={:.3}ms send_blocked={:.3}ms",
+                batches,
+                produce.as_secs_f64() * 1e3,
+                send.as_secs_f64() * 1e3,
+            );
         };
 
         let (abort_handle, join_fut) = exec.spawn_with_abort_handle(fut);

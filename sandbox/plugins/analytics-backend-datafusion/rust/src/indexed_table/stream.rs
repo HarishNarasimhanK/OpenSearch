@@ -418,6 +418,24 @@ struct IndexedStream {
     mask_offset: usize,
     batch_offset: usize,
     finished: bool,
+    /// One-shot guard so the diagnostic metrics dump logs once per stream at EOF.
+    metrics_dumped: bool,
+    /// Wall-clock when the previous `poll_next` returned. The span from this to
+    /// the start of the next poll is the time the task spent PARKED between polls
+    /// (waiting on the prefetch / scheduler) — accumulated into the cumulative
+    /// `inter_poll_gap` metric. `None` before the first poll (no gap to count).
+    last_poll_end: Option<Instant>,
+    /// Individual inter-poll gap samples (ms) for this stream, so we can print
+    /// the actual distribution instead of a misleading average. Diagnostic only.
+    gap_samples_ms: Vec<f64>,
+    /// DIAGNOSTIC: object-store read wall-time accumulator, shared into every
+    /// per-RG parquet reader. Compared against `inter_poll_gap` in the dump.
+    /// Created once per QUERY (shared across all chunk streams) so the harvest
+    /// is complete regardless of which stream's Drop runs the dump.
+    io_stats: Arc<super::parquet_bridge::ReadIoStats>,
+    /// DIAGNOSTIC: this stream's own per-RG inner plans (rg_index, plan), logged
+    /// individually at dump time so we read each RG's parquet metrics directly.
+    my_inner_plans: Vec<(usize, Arc<dyn ExecutionPlan>)>,
     metadata: Arc<ParquetMetaData>,
     predicate: Option<Arc<dyn datafusion::physical_expr::PhysicalExpr>>,
     initialized: bool,
@@ -502,6 +520,11 @@ impl IndexedStream {
             mask_offset: 0,
             batch_offset: 0,
             finished: false,
+            metrics_dumped: false,
+            last_poll_end: None,
+            gap_samples_ms: Vec::new(),
+            io_stats: Arc::new(super::parquet_bridge::ReadIoStats::default()),
+            my_inner_plans: Vec::new(),
             metadata,
             predicate,
             initialized: false,
@@ -531,6 +554,11 @@ impl IndexedStream {
             metadata: Arc::clone(&self.metadata),
             projection: self.projection.clone(),
             predicate: self.predicate.clone(),
+            io_stats: self
+                .metrics
+                .io_stats
+                .clone()
+                .unwrap_or_else(|| Arc::clone(&self.io_stats)),
         }
     }
 
@@ -692,6 +720,15 @@ impl IndexedStream {
     }
 }
 
+impl Drop for IndexedStream {
+    fn drop(&mut self) {
+        // Fires on both natural EOF and early drop (e.g. GlobalLimitExec stops
+        // pulling at fetch=N before our stream reaches its own end). The EOF
+        // returns also call dump_metrics_once(); the one-shot guard dedups.
+        self.dump_metrics_once();
+    }
+}
+
 impl Stream for IndexedStream {
     type Item = Result<RecordBatch>;
 
@@ -702,6 +739,20 @@ impl Stream for IndexedStream {
         // time downstream work.
         let poll_start = Instant::now();
 
+        // Time spent PARKED since the previous poll returned (waiting on the
+        // prefetch oneshot / scheduler). This is the between-poll time that
+        // `elapsed_compute` (in-poll only) never sees.
+        if let Some(prev_end) = self.last_poll_end {
+            let gap = poll_start.saturating_duration_since(prev_end);
+            if let Some(ref t) = self.metrics.inter_poll_gap {
+                t.add_duration(gap);
+            }
+            self.gap_samples_ms.push(gap.as_secs_f64() * 1e3);
+        }
+        if let Some(ref c) = self.metrics.poll_count {
+            c.add(1);
+        }
+
         if !self.initialized {
             self.index_reader.init_prefetch();
             self.initialized = true;
@@ -709,14 +760,191 @@ impl Stream for IndexedStream {
 
         let result = self.as_mut().poll_inner(cx);
 
+        let now = Instant::now();
         if let Some(ref t) = self.metrics.elapsed_compute {
-            t.add_duration(poll_start.elapsed());
+            t.add_duration(now.saturating_duration_since(poll_start));
         }
+        self.last_poll_end = Some(now);
         result
     }
 }
 
 impl IndexedStream {
+    /// Diagnostic: dump the CUMULATIVE scan metrics. All the `Time`/`Count`
+    /// fields are shared (Arc) across every chunk stream of the partition, so
+    /// these values are partition-wide running totals — NOT per-stream. The
+    /// reconciliation that matters is therefore against the partition-wide wall
+    /// clock (`stream_next total` / `produce`), not any single stream's lifetime:
+    ///
+    ///   produce ≈ elapsed_compute (in-poll work) + inter_poll_gap (parked)
+    ///   elapsed_compute ≈ Σ sub-stage timers (parquet_poll dominates)
+    ///
+    /// Logged once per stream (guarded), but since the counters are cumulative,
+    /// the LAST stream's line carries the full-query totals. Per-stream lifetime
+    /// is deliberately NOT logged — it is incomparable to the cumulative timers
+    /// and produced the nonsensical negative "unattributed" we saw earlier.
+    fn dump_metrics_once(&mut self) {
+        if self.metrics_dumped {
+            return;
+        }
+        self.metrics_dumped = true;
+        let ms = |t: &Option<datafusion::physical_plan::metrics::Time>| {
+            t.as_ref().map(|x| x.value() as f64 / 1e6).unwrap_or(0.0)
+        };
+        let n = |c: &Option<datafusion::physical_plan::metrics::Count>| {
+            c.as_ref().map(|x| x.value()).unwrap_or(0)
+        };
+        let m = &self.metrics;
+        let index_t = ms(&m.index_time);
+        let prefetch_wait = ms(&m.prefetch_wait_time);
+        let parquet_t = ms(&m.parquet_time);
+        let coalesce_t = ms(&m.coalesce_time);
+        let build_mask = ms(&m.build_mask_time);
+        let filter_rb = ms(&m.filter_record_batch_time);
+        let on_batch = ms(&m.on_batch_mask_time);
+        let proj = ms(&m.projection_fixup_time);
+        let mask_slice = ms(&m.mask_slice_time);
+        let parquet_poll = ms(&m.parquet_poll_time);
+        let elapsed = ms(&m.elapsed_compute);
+        let inter_gap = ms(&m.inter_poll_gap);
+        // Sub-stages that run ON the poll thread, so they should sum toward
+        // elapsed_compute. `index_query` runs on the spawn_blocking prefetch
+        // thread (off the poll thread) and surfaces as `prefetch_wait` when the
+        // poll thread parks on it — so it is NOT part of the in-poll sum.
+        let sum_subparts = parquet_poll
+            + coalesce_t
+            + build_mask
+            + filter_rb
+            + on_batch
+            + proj
+            + mask_slice;
+        // Two reconciliations:
+        //  - in-poll residual: elapsed_compute not covered by named sub-stages
+        //  - wall estimate: in-poll work + parked-between-polls
+        let in_poll_residual = elapsed - sum_subparts;
+        let wall_est = elapsed + inter_gap;
+
+        // Inner DataFusion parquet metrics, summed across every RG's
+        // DataSourceExec MetricsSet — dumped GENERICALLY (every metric name the
+        // parquet scan emits), so nothing is cherry-picked. Time metrics are
+        // shown in ms, everything else as a raw count.
+        // Log EACH RG's inner parquet plan metrics on its OWN line. No
+        // programmatic aggregation — sum by eye from the per-RG lines. Only logs
+        // if this stream actually processed RGs (work-stream), so empty sibling
+        // streams stay silent instead of printing misleading sets=0.
+        if !self.my_inner_plans.is_empty() {
+            native_bridge_common::log_info!(
+                "[inner-parquet] this stream processed {} row groups; per-RG metrics follow:",
+                self.my_inner_plans.len(),
+            );
+            for (rg_idx, plan) in &self.my_inner_plans {
+                if let Some(set) = plan.metrics() {
+                    let mut parts: Vec<String> = Vec::new();
+                    for metric in set.iter() {
+                        let mv = metric.value();
+                        let name = mv.name();
+                        let raw = mv.as_usize();
+                        // Heuristic: nanosecond timers contain "time".
+                        if name.contains("time") {
+                            parts.push(format!("{}={:.3}ms", name, raw as f64 / 1e6));
+                        } else {
+                            parts.push(format!("{}={}", name, raw));
+                        }
+                    }
+                    parts.sort();
+                    native_bridge_common::log_info!(
+                        "[inner-parquet-rg{}] {}", rg_idx, parts.join(" "),
+                    );
+                } else {
+                    native_bridge_common::log_info!(
+                        "[inner-parquet-rg{}] <no metrics()>", rg_idx,
+                    );
+                }
+            }
+
+            // Self-reconciling roll-up: sum the three DataFusion FileStream
+            // timers across this stream's RGs and correlate to OUR metrics.
+            //   processing            ≈ parquet_poll      (CPU decode, no park)
+            //   until_data − processing ≈ inter_poll_gap  (read-wait park)
+            //   scanning_total        ≈ wall_est          (all-in envelope)
+            // See file_stream/scan_state.rs for the start/stop semantics.
+            let sum_named = |plans: &[(usize, Arc<dyn ExecutionPlan>)], want: &str| -> f64 {
+                let mut ns = 0u64;
+                for (_, plan) in plans {
+                    if let Some(set) = plan.metrics() {
+                        // A plan emits the same name twice (partition + agg);
+                        // take the max so we don't double-count.
+                        let mut best = 0usize;
+                        for metric in set.iter() {
+                            if metric.value().name() == want {
+                                best = best.max(metric.value().as_usize());
+                            }
+                        }
+                        ns += best as u64;
+                    }
+                }
+                ns as f64 / 1e6
+            };
+            let processing = sum_named(&self.my_inner_plans, "time_elapsed_processing");
+            let until_data = sum_named(&self.my_inner_plans, "time_elapsed_scanning_until_data");
+            let scanning_total = sum_named(&self.my_inner_plans, "time_elapsed_scanning_total");
+            let opening = sum_named(&self.my_inner_plans, "time_elapsed_opening");
+            let read_wait_est = until_data - processing;
+            native_bridge_common::log_info!(
+                "[inner-parquet-rollup] rgs={} | Σprocessing(decode)={:.1}ms Σuntil_data={:.1}ms \
+                 Σscanning_total(envelope)={:.1}ms Σopening={:.1}ms | derived_read_wait(until_data-processing)={:.1}ms \
+                 || correlate: parquet_poll≈Σprocessing, inter_poll_gap≈derived_read_wait, wall_est≈Σscanning_total",
+                self.my_inner_plans.len(), processing, until_data, scanning_total, opening, read_wait_est,
+            );
+        }
+
+        // Actual inter-poll gap DISTRIBUTION for this stream (sorted, ms) — not
+        // an average. Proves whether the parked time is one big stall or many
+        // uniform ~Nms parks.
+        let mut samples = self.gap_samples_ms.clone();
+        samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let total: f64 = samples.iter().sum();
+        let max = samples.last().copied().unwrap_or(0.0);
+        let p50 = samples.get(samples.len() / 2).copied().unwrap_or(0.0);
+        let formatted: Vec<String> = samples.iter().map(|s| format!("{:.2}", s)).collect();
+        native_bridge_common::log_info!(
+            "[gap-distribution] n={} total={:.1}ms max={:.2}ms p50={:.2}ms | sorted_ms=[{}]",
+            samples.len(), total, max, p50, formatted.join(", "),
+        );
+
+        // THE decisive line: actual object-store read wall-time vs the parked
+        // gap (both query-wide cumulative now). If read_total ≈ inter_poll_gap,
+        // the gap IS the read; if read_total ≪ gap, it's runtime/handoff.
+        use std::sync::atomic::Ordering;
+        let io = self.metrics.io_stats.clone().unwrap_or_else(|| Arc::clone(&self.io_stats));
+        let read_total_ms = io.total_ns.load(Ordering::Relaxed) as f64 / 1e6;
+        let read_count = io.count.load(Ordering::Relaxed);
+        let read_max_ms = io.max_ns.load(Ordering::Relaxed) as f64 / 1e6;
+        native_bridge_common::log_info!(
+            "[read-io-vs-gap] object_store_reads={} read_total={:.1}ms read_max={:.2}ms \
+             read_avg={:.3}ms | inter_poll_gap(cumulative)={:.1}ms | gap_minus_read={:.1}ms \
+             (= runtime/handoff if >0)",
+            read_count, read_total_ms, read_max_ms,
+            if read_count > 0 { read_total_ms / read_count as f64 } else { 0.0 },
+            inter_gap, inter_gap - read_total_ms,
+        );
+
+        native_bridge_common::log_info!(
+            "[indexed-metrics-cumulative] wall_est(elapsed+gap)={:.1}ms | \
+             elapsed_compute={:.1}ms inter_poll_gap={:.1}ms poll_count={} parquet_pending={} \
+             gap_per_pending={:.3}ms | \
+             parquet_poll={:.1}ms index_query={:.1}ms parquet_read={:.1}ms coalesce={:.1}ms \
+             build_mask={:.1}ms filter_rb={:.1}ms on_batch_mask={:.1}ms mask_slice={:.1}ms \
+             projection={:.1}ms prefetch_wait={:.1}ms | sum_subparts={:.1}ms \
+             in_poll_residual={:.1}ms | rg_processed={} rg_skipped={} rows_matched={} batches={}",
+            wall_est, elapsed, inter_gap, n(&m.poll_count), n(&m.parquet_pending_count),
+            if n(&m.parquet_pending_count) > 0 { inter_gap / n(&m.parquet_pending_count) as f64 } else { 0.0 },
+            parquet_poll, index_t, parquet_t, coalesce_t, build_mask, filter_rb,
+            on_batch, mask_slice, proj, prefetch_wait, sum_subparts, in_poll_residual,
+            n(&m.rg_processed), n(&m.rg_skipped), n(&m.rows_matched), n(&m.batches_produced),
+        );
+    }
+
     fn poll_inner(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -735,6 +963,7 @@ impl IndexedStream {
 
             // 2. If upstream is done and coalescer has drained, we're done.
             if self.coalescer_finished && self.batch_coalescer.is_empty() {
+                self.dump_metrics_once();
                 return Poll::Ready(None);
             }
 
@@ -754,6 +983,7 @@ impl IndexedStream {
             if self.coalescer_finished {
                 // Unreachable in practice — step 1 already drained or
                 // step 2 already returned. Defensive.
+                self.dump_metrics_once();
                 return Poll::Ready(None);
             }
 
@@ -765,6 +995,15 @@ impl IndexedStream {
                 let poll_result = Pin::new(stream).poll_next(cx);
                 if let Some(ref t) = self.metrics.parquet_poll_time {
                     t.add_duration(t_poll.elapsed());
+                }
+                // DIAGNOSTIC: if the parquet stream returned Pending, THIS is the
+                // source of the inter_poll_gap park. Tag it so we can prove the
+                // 88ms is the parquet read await (object_store spawn_blocking),
+                // not a prefetch/scheduler artifact.
+                if poll_result.is_pending() {
+                    if let Some(ref c) = self.metrics.parquet_pending_count {
+                        c.add(1);
+                    }
                 }
                 match poll_result {
                     Poll::Ready(Some(Ok(batch))) if batch.num_rows() > 0 => {
@@ -971,6 +1210,9 @@ impl IndexedStream {
                                 timer.add_duration(t_plan.elapsed());
                             }
                             self.current_stream = Some(stream);
+                            // Retain in a PER-STREAM vec; logged individually in
+                            // this same stream's dump (no cross-stream Arc).
+                            self.my_inner_plans.push((rg.index, Arc::clone(&plan)));
                             self.current_inner_plan = Some(plan);
                             // Under row-granular (min_skip_run == 1) every
                             // delivered row is by construction a candidate,

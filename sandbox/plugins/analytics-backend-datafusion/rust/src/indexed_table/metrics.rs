@@ -100,8 +100,42 @@ pub struct StreamMetrics {
     /// Time spent polling the inner parquet stream (pull decoded
     /// batch), isolating decode from our own processing.
     pub parquet_poll_time: Option<Time>,
+    /// Count of row groups skipped by the runtime dynamic-filter pruner at the
+    /// PREFETCH phase — before the Lucene/FFM eval ran. This saves both the
+    /// index eval and the parquet decode. Zero when no dynamic filter was pushed.
+    pub dynamic_filter_rg_pruned_at_prefetch: Option<Count>,
+    /// Count of row groups skipped by the runtime dynamic-filter pruner at the
+    /// POLL phase — after the Lucene/FFM eval but before parquet decode. Catches
+    /// RGs that became prunable only after the filter tightened further between
+    /// prefetch (which runs ~1 RG ahead) and processing.
+    pub dynamic_filter_rg_pruned_at_poll: Option<Count>,
+    /// Count of chunks this partition processed beyond its own static assignment
+    /// — i.e. stolen from the shared work queue (work-stealing). Zero unless
+    /// `indexed_work_stealing` is on. Summed across partitions, a non-zero total
+    /// proves the rebalancing path fired.
+    pub work_stolen_chunks: Option<Count>,
+    /// Cumulative wall-clock spent PARKED between consecutive `poll_next` calls
+    /// (the task returned `Poll::Pending` — typically waiting on the
+    /// `spawn_blocking` prefetch — and the runtime had not yet re-polled it).
+    /// This is the "between-poll" time that `elapsed_compute` (sum of in-poll
+    /// durations) does NOT capture. `produce ≈ elapsed_compute + inter_poll_gap`.
+    pub inter_poll_gap: Option<Time>,
+    /// Cumulative count of `poll_next` invocations across all chunk streams.
+    pub poll_count: Option<Count>,
+    /// Count of times the inner parquet stream returned `Poll::Pending` — i.e.
+    /// it awaited a read and parked our task. If this ≈ the number of parked
+    /// polls, the `inter_poll_gap` is parquet read-await, not prefetch/scheduler.
+    pub parquet_pending_count: Option<Count>,
     /// Accumulated inner `DataSourceExec` parquet metrics (shared across partitions).
     pub inner_parquet_metrics: Option<Arc<std::sync::Mutex<Vec<MetricsSet>>>>,
+    /// DIAGNOSTIC: shared across all chunk streams of the query. Every per-RG
+    /// inner parquet plan is pushed here at creation; the dump reads their live
+    /// metrics at the end. Shared (unlike a per-stream Vec) so the harvest sees
+    /// ALL plans regardless of which stream's Drop runs the dump.
+    pub inner_plans: Option<Arc<std::sync::Mutex<Vec<std::sync::Arc<dyn datafusion::physical_plan::ExecutionPlan>>>>>,
+    /// DIAGNOSTIC: object-store read wall-time, shared across all chunk streams
+    /// so the harvest is complete regardless of which stream's Drop dumps.
+    pub io_stats: Option<Arc<crate::indexed_table::parquet_bridge::ReadIoStats>>,
 }
 
 impl StreamMetrics {
@@ -139,7 +173,15 @@ impl StreamMetrics {
             mask_slice_time: None,
             projection_fixup_time: None,
             parquet_poll_time: None,
+            dynamic_filter_rg_pruned_at_prefetch: None,
+            dynamic_filter_rg_pruned_at_poll: None,
+            work_stolen_chunks: None,
+            inter_poll_gap: None,
+            poll_count: None,
+            parquet_pending_count: None,
             inner_parquet_metrics: None,
+            inner_plans: None,
+            io_stats: None,
         }
     }
 }
@@ -177,6 +219,12 @@ pub struct PartitionMetrics {
     pub mask_slice_time: Time,
     pub projection_fixup_time: Time,
     pub parquet_poll_time: Time,
+    pub dynamic_filter_rg_pruned_at_prefetch: Count,
+    pub dynamic_filter_rg_pruned_at_poll: Count,
+    pub work_stolen_chunks: Count,
+    pub inter_poll_gap: Time,
+    pub poll_count: Count,
+    pub parquet_pending_count: Count,
 }
 
 impl PartitionMetrics {
@@ -219,6 +267,12 @@ impl PartitionMetrics {
                 .subset_time("projection_fixup_time", partition),
             parquet_poll_time: MetricBuilder::new(metrics)
                 .subset_time("parquet_poll_time", partition),
+            dynamic_filter_rg_pruned_at_prefetch: counter("dynamic_filter_rg_pruned_at_prefetch"),
+            dynamic_filter_rg_pruned_at_poll: counter("dynamic_filter_rg_pruned_at_poll"),
+            work_stolen_chunks: counter("work_stolen_chunks"),
+            inter_poll_gap: MetricBuilder::new(metrics).subset_time("inter_poll_gap", partition),
+            poll_count: counter("poll_count"),
+            parquet_pending_count: counter("parquet_pending_count"),
         }
     }
 
@@ -259,7 +313,15 @@ impl PartitionMetrics {
             mask_slice_time: Some(self.mask_slice_time),
             projection_fixup_time: Some(self.projection_fixup_time),
             parquet_poll_time: Some(self.parquet_poll_time),
+            dynamic_filter_rg_pruned_at_prefetch: Some(self.dynamic_filter_rg_pruned_at_prefetch),
+            dynamic_filter_rg_pruned_at_poll: Some(self.dynamic_filter_rg_pruned_at_poll),
+            work_stolen_chunks: Some(self.work_stolen_chunks),
+            inter_poll_gap: Some(self.inter_poll_gap),
+            poll_count: Some(self.poll_count),
+            parquet_pending_count: Some(self.parquet_pending_count),
             inner_parquet_metrics,
+            inner_plans: Some(Arc::new(std::sync::Mutex::new(Vec::new()))),
+            io_stats: Some(Arc::new(crate::indexed_table::parquet_bridge::ReadIoStats::default())),
         }
     }
 }

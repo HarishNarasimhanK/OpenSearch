@@ -68,10 +68,32 @@ use crate::query_tracker::{self, QueryTrackingContext};
 use crate::runtime_manager::RuntimeManager;
 use crate::shard_table_provider::{ShardTableConfig, ShardTableProvider};
 
+/// Per-query wall-clock accounting for `stream_next`, to locate the
+/// "unaccounted" time between `QueryShardExec` metrics and the observed
+/// `cumulative_stream_next`. Every `stream_next` call splits into:
+///   - `poll`   — `stream.try_next().await`: drives the whole plan (across the
+///                CrossRtStream channel) until a batch is ready or EOF, and
+///   - `export` — turning the arrived `RecordBatch` into an `FFI_ArrowArray`
+///                (StructArray conversion + optional view compaction).
+/// `poll + export ≈ time inside stream_next`; comparing `poll` against the
+/// plan's reported `elapsed_compute` reveals time spent outside poll (channel
+/// handoff, scheduler waits, blocking-thread handoff), and `export` reveals FFI
+/// cost that never shows up in any ExecutionPlan metric.
+#[derive(Default)]
+pub struct StreamNextTiming {
+    pub calls: u64,
+    pub batches: u64,
+    pub poll: std::time::Duration,
+    pub export: std::time::Duration,
+    pub total: std::time::Duration,
+}
+
 /// Bundles a stream with its query tracking context so that dropping the
 /// handle automatically marks the query completed in the registry.
 pub struct QueryStreamHandle {
     stream: RecordBatchStreamAdapter<CrossRtStream>,
+    /// Accumulated `stream_next` timing; logged on drop.
+    timing: StreamNextTiming,
     /// Held for its `Drop` impl — marks the query completed when the
     /// stream is closed.
     _query_tracking_context: QueryTrackingContext,
@@ -83,6 +105,11 @@ pub struct QueryStreamHandle {
     /// Concurrency gate permit — held for the query's entire lifetime.
     /// Released on drop, which frees partition budget for other queries.
     _concurrency_permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    /// DIAGNOSTIC: the executed physical plan, retained so `Drop` can render it
+    /// WITH metrics (`displayable(..).with_metrics()`) after the stream has fully
+    /// drained. `None` skips the dump. This is the only place plan metrics are
+    /// observable — the pre-execution `log_debug!` dumps show all-zero metrics.
+    diagnostic_plan: Option<Arc<dyn datafusion::physical_plan::ExecutionPlan>>,
 }
 
 impl QueryStreamHandle {
@@ -100,11 +127,23 @@ impl QueryStreamHandle {
         let has_views = Self::schema_has_views(&stream.schema());
         Self {
             stream,
+            timing: StreamNextTiming::default(),
             _query_tracking_context: query_context,
             _session_ctx: None,
             has_views,
             _concurrency_permit: permit,
+            diagnostic_plan: None,
         }
+    }
+
+    /// DIAGNOSTIC: retain the executed physical plan so `Drop` can dump it with
+    /// live metrics once the stream has drained. Builder-style; returns self.
+    pub fn with_diagnostic_plan(
+        mut self,
+        plan: Arc<dyn datafusion::physical_plan::ExecutionPlan>,
+    ) -> Self {
+        self.diagnostic_plan = Some(plan);
+        self
     }
 
     pub fn with_session_context(
@@ -116,10 +155,48 @@ impl QueryStreamHandle {
         let has_views = Self::schema_has_views(&stream.schema());
         Self {
             stream,
+            timing: StreamNextTiming::default(),
             _query_tracking_context: query_context,
             _session_ctx: Some(ctx),
             has_views,
             _concurrency_permit: permit,
+            diagnostic_plan: None,
+        }
+    }
+}
+
+impl Drop for QueryStreamHandle {
+    fn drop(&mut self) {
+        let t = &self.timing;
+        // Time inside stream_next that is NOT the plan poll (channel handoff,
+        // scheduler/wakeup waits, blocking-thread handoff between CPU runtime
+        // and IO runtime). This is the prime suspect for the "unaccounted" gap.
+        let outside_export = t.total.saturating_sub(t.export);
+        native_bridge_common::log_info!(
+            "[stream_next-timing] calls={} batches={} total={:.3}ms poll={:.3}ms export={:.3}ms \
+             (poll+export={:.3}ms, total-export={:.3}ms)",
+            t.calls,
+            t.batches,
+            t.total.as_secs_f64() * 1e3,
+            t.poll.as_secs_f64() * 1e3,
+            t.export.as_secs_f64() * 1e3,
+            (t.poll + t.export).as_secs_f64() * 1e3,
+            outside_export.as_secs_f64() * 1e3,
+        );
+
+        // DIAGNOSTIC: dump the physical plan WITH live metrics, now that the
+        // stream has fully drained. `with_metrics()` is what renders the
+        // per-operator metric lines (incl. QueryShardExec's aggregated inner
+        // parquet metrics); plain `indent(true)` does not. Logged via
+        // `log_info!` because `log_debug!` is dropped by the Java bridge.
+        if let Some(ref plan) = self.diagnostic_plan {
+            let rendered =
+                datafusion::physical_plan::display::DisplayableExecutionPlan::with_metrics(
+                    plan.as_ref(),
+                )
+                .indent(true)
+                .to_string();
+            native_bridge_common::log_info!("[plan-metrics]\n{}", rendered);
         }
     }
 }
@@ -903,19 +980,30 @@ pub async unsafe fn stream_next(
     let handle = &mut *(stream_ptr as *mut QueryStreamHandle);
     let token = query_tracker::get_cancellation_token(handle._query_tracking_context.context_id());
 
-    // Fetch the next batch (cancellation-aware)
+    let call_start = std::time::Instant::now();
+
+    // ── Phase 1: poll — drive the plan (across the CrossRtStream channel)
+    //    until the next batch is ready or the stream ends.
+    let poll_start = std::time::Instant::now();
     let result = cancellation::cancellable_or(
         token.as_ref(),
         None,
         async { handle.stream.try_next().await.map_err(|e: DataFusionError| e) },
     ).await
     .map_err(|e| DataFusionError::Execution(e))?;
+    let poll_elapsed = poll_start.elapsed();
+    handle.timing.poll += poll_elapsed;
+    handle.timing.calls += 1;
 
-    match result {
+    let out = match result {
         Some(batch) => {
+            handle.timing.batches += 1;
             // Apply pending phantom correction from the self-correcting budget.
             handle._query_tracking_context.apply_pending_phantom_correction();
 
+            // ── Phase 2: export — RecordBatch → FFI_ArrowArray. This is inside
+            //    cumulative_stream_next but invisible to ExecutionPlan metrics.
+            let export_start = std::time::Instant::now();
             let batch = if handle.has_views {
                 compact_string_view_columns(batch)
             } else {
@@ -924,10 +1012,14 @@ pub async unsafe fn stream_next(
             let struct_array: StructArray = batch.into();
             let array_data = struct_array.into_data();
             let ffi_array = FFI_ArrowArray::new(&array_data);
+            handle.timing.export += export_start.elapsed();
             Ok(Box::into_raw(Box::new(ffi_array)) as i64)
         }
         None => Ok(0),
-    }
+    };
+
+    handle.timing.total += call_start.elapsed();
+    out
 }
 
 /// Prevents sliced StringView batches from carrying full backing buffers across FFI.

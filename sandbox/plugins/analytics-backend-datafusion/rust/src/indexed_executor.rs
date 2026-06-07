@@ -885,6 +885,9 @@ async unsafe fn execute_indexed_with_context_inner(
     let target_schema = crate::schema_coerce::coerce_inferred_schema(physical_plan.schema());
     let physical_plan = crate::relabel_exec::wrap_if_relabel_needed(physical_plan, target_schema)?;
     log_debug!("DataFusion physical plan:\n{}", displayable(physical_plan.as_ref()).indent(true));
+    // Clone the Arc before `execute_stream` consumes the plan, so the stream
+    // handle can dump it WITH live metrics on drop (post-execution).
+    let diagnostic_plan = Arc::clone(&physical_plan);
     let df_stream = execute_stream(physical_plan, ctx.task_ctx())
         .map_err(|e| DataFusionError::Execution(format!("execute_stream: {}", e)))?;
 
@@ -897,6 +900,7 @@ async unsafe fn execute_indexed_with_context_inner(
 
     let schema = cross_rt_stream.schema();
     let wrapped = RecordBatchStreamAdapter::new(schema, cross_rt_stream);
-    let stream_handle = crate::api::QueryStreamHandle::with_session_context(wrapped, query_context, ctx, Some(permit));
+    let stream_handle = crate::api::QueryStreamHandle::with_session_context(wrapped, query_context, ctx, Some(permit))
+        .with_diagnostic_plan(diagnostic_plan);
     Ok(Box::into_raw(Box::new(stream_handle)) as i64)
 }

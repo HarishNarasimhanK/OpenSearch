@@ -311,6 +311,43 @@ impl TableProvider for IndexedTableProvider {
     }
 }
 
+/// Collapse the per-RG inner `DataSourceExec` metric sets into ONE aggregated
+/// set, so EXPLAIN ANALYZE shows a single `time_elapsed_processing`,
+/// `bytes_scanned`, etc. for the whole scan instead of N per-RG copies.
+///
+/// `MetricsSet::aggregate_by_name` sums `Time`/`Count` metrics and min/max's
+/// timestamps. Two correctness notes:
+///
+/// 1. **Double-registration is exact, not double-counted.** `ParquetFileMetrics`
+///    fields (`bytes_scanned`, `metadata_load_time`, the pruning counters) are
+///    registered TWICE per plan — once by DataFusion's `ParquetOpener`, once by
+///    our `CachedMetadataReaderFactory`. Reads flow through our reader, so the
+///    opener's copy stays 0; the two copies aggregate within a plan as
+///    `0 + real = real`. The `time_elapsed_*` FileStream timers are registered
+///    once per plan, so summing across RGs is exact.
+/// 2. **`output_*` are dropped.** The inner scan's `output_rows`/`output_batches`/
+///    `output_bytes` count PRE-filter parquet rows and would collide with
+///    `QueryShardExec`'s own (post-filter) `output_rows`. We strip them so the
+///    operator's reported output stays correct.
+fn aggregate_inner_parquet_metrics(inner: &[MetricsSet]) -> MetricsSet {
+    let mut flat = MetricsSet::new();
+    for set in inner {
+        for m in set.iter() {
+            flat.push(m.clone());
+        }
+    }
+    let aggregated = flat.aggregate_by_name();
+    let mut out = MetricsSet::new();
+    for m in aggregated.iter() {
+        let name = m.value().name();
+        if name == "output_rows" || name == "output_batches" || name == "output_bytes" {
+            continue;
+        }
+        out.push(m.clone());
+    }
+    out
+}
+
 // ── QueryShardExec ───────────────────────────────────────────────────
 
 /// One execution plan per query. Partitions into `assignments.len()` streams,
@@ -378,14 +415,8 @@ impl ExecutionPlan for QueryShardExec {
     fn metrics(&self) -> Option<MetricsSet> {
         let mut combined = self.metrics.clone_inner();
         if let Ok(inner) = self.inner_parquet_metrics.lock() {
-            for set in inner.iter() {
-                for m in set.iter() {
-                    let name = m.value().name();
-                    if name == "output_rows" || name == "output_batches" || name == "output_bytes" {
-                        continue;
-                    }
-                    combined.push(m.clone());
-                }
+            for m in aggregate_inner_parquet_metrics(&inner).iter() {
+                combined.push(m.clone());
             }
         }
         Some(combined)
@@ -578,5 +609,74 @@ mod tests {
         let provider = IndexedTableProvider::new(empty_config());
         let pred = scan_predicate(&provider, &[]).await;
         assert!(pred.is_none(), "no filters → no predicate");
+    }
+
+    // ── aggregate_inner_parquet_metrics ──────────────────────────────
+    use datafusion::physical_plan::metrics::MetricBuilder;
+
+    /// Read the (aggregated) value of a named metric out of a set.
+    fn metric_value(set: &MetricsSet, name: &str) -> Option<usize> {
+        set.iter()
+            .find(|m| m.value().name() == name)
+            .map(|m| m.value().as_usize())
+    }
+
+    /// How many distinct entries in the set carry `name`.
+    fn metric_occurrences(set: &MetricsSet, name: &str) -> usize {
+        set.iter().filter(|m| m.value().name() == name).count()
+    }
+
+    /// Build one per-RG `MetricsSet` shaped like a real inner `DataSourceExec`:
+    /// `bytes_scanned` registered TWICE (one phantom 0 from the opener, one real
+    /// from our reader), `time_elapsed_processing` once, `output_rows` once.
+    fn fake_rg_metrics(bytes: usize, processing_ns: u64, rows: usize) -> MetricsSet {
+        let eps = ExecutionPlanMetricsSet::new();
+        // Phantom opener copy (stays 0), then our reader's real copy.
+        MetricBuilder::new(&eps).counter("bytes_scanned", 0); // phantom 0
+        MetricBuilder::new(&eps).counter("bytes_scanned", 0).add(bytes);
+        MetricBuilder::new(&eps)
+            .subset_time("time_elapsed_processing", 0)
+            .add_duration(std::time::Duration::from_nanos(processing_ns));
+        MetricBuilder::new(&eps).output_rows(0).add(rows);
+        eps.clone_inner()
+    }
+
+    #[test]
+    fn aggregate_inner_metrics_sums_across_rgs_and_strips_output() {
+        // Three RGs. bytes: 100,200,300 (each with a phantom 0 sibling).
+        // processing: 10,20,30 ns. output_rows: 5,5,5 (must be stripped).
+        let rgs = vec![
+            fake_rg_metrics(100, 10, 5),
+            fake_rg_metrics(200, 20, 5),
+            fake_rg_metrics(300, 30, 5),
+        ];
+
+        let agg = aggregate_inner_parquet_metrics(&rgs);
+
+        // bytes_scanned collapses to a SINGLE entry summing to 600 — the phantom
+        // zeros contribute nothing, no double-count.
+        assert_eq!(
+            metric_occurrences(&agg, "bytes_scanned"),
+            1,
+            "bytes_scanned must collapse to one entry"
+        );
+        assert_eq!(metric_value(&agg, "bytes_scanned"), Some(600));
+
+        // time_elapsed_processing sums to 60ns across the 3 RGs.
+        assert_eq!(metric_occurrences(&agg, "time_elapsed_processing"), 1);
+        assert_eq!(metric_value(&agg, "time_elapsed_processing"), Some(60));
+
+        // output_rows is stripped entirely (would collide with QueryShardExec).
+        assert_eq!(
+            metric_occurrences(&agg, "output_rows"),
+            0,
+            "inner output_rows must be dropped"
+        );
+    }
+
+    #[test]
+    fn aggregate_inner_metrics_empty_is_empty() {
+        let agg = aggregate_inner_parquet_metrics(&[]);
+        assert_eq!(agg.iter().count(), 0);
     }
 }

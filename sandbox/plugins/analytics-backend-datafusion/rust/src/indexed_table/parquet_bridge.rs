@@ -85,6 +85,10 @@ pub struct RowGroupStreamConfig {
     pub metadata: Arc<ParquetMetaData>,
     pub projection: Option<Vec<usize>>,
     pub predicate: Option<Arc<dyn datafusion::physical_expr::PhysicalExpr>>,
+    /// DIAGNOSTIC: shared read-IO accumulator. Every RG's reader records its
+    /// object-store read wall-time here so we can compare Σ(read time) against
+    /// `inter_poll_gap` and prove what the parked time actually is.
+    pub io_stats: Arc<ReadIoStats>,
 }
 
 /// Create a stream that reads a single row group using `RowSelection`.
@@ -143,9 +147,10 @@ fn create_stream_with_access_plan(
     let partitioned_file = PartitionedFile::new(config.file_path.clone(), config.file_size)
         .with_extensions(Arc::new(access_plan));
 
-    let reader_factory = Arc::new(CachedMetadataReaderFactory::new(
+    let reader_factory = Arc::new(CachedMetadataReaderFactory::with_io_stats(
         Arc::clone(&config.store),
         Arc::clone(&config.metadata),
+        Arc::clone(&config.io_stats),
     )) as Arc<dyn ParquetFileReaderFactory>;
 
     let mut parquet_source = ParquetSource::new(config.full_schema.clone())
@@ -180,6 +185,16 @@ fn create_stream_with_access_plan(
     Ok((stream, exec))
 }
 
+/// DIAGNOSTIC: shared accumulator for actual object-store read wall-time and
+/// count, so we can prove how much of `inter_poll_gap` is real read latency vs
+/// runtime wakeup/handoff. `(total_read_time, read_count, max_single_read)`.
+#[derive(Debug, Default)]
+pub struct ReadIoStats {
+    pub total_ns: std::sync::atomic::AtomicU64,
+    pub count: std::sync::atomic::AtomicU64,
+    pub max_ns: std::sync::atomic::AtomicU64,
+}
+
 /// Factory that creates parquet readers with pre-cached metadata.
 ///
 /// Avoids re-reading metadata for each row group.
@@ -187,11 +202,20 @@ fn create_stream_with_access_plan(
 pub struct CachedMetadataReaderFactory {
     store: Arc<dyn ObjectStore>,
     metadata: Arc<ParquetMetaData>,
+    io_stats: Arc<ReadIoStats>,
 }
 
 impl CachedMetadataReaderFactory {
     pub fn new(store: Arc<dyn ObjectStore>, metadata: Arc<ParquetMetaData>) -> Self {
-        Self { store, metadata }
+        Self::with_io_stats(store, metadata, Arc::new(ReadIoStats::default()))
+    }
+
+    pub fn with_io_stats(
+        store: Arc<dyn ObjectStore>,
+        metadata: Arc<ParquetMetaData>,
+        io_stats: Arc<ReadIoStats>,
+    ) -> Self {
+        Self { store, metadata, io_stats }
     }
 }
 
@@ -210,6 +234,7 @@ impl ParquetFileReaderFactory for CachedMetadataReaderFactory {
             location: file.object_meta.location.clone(),
             metadata: Arc::clone(&self.metadata),
             metrics: file_metrics,
+            io_stats: Arc::clone(&self.io_stats),
         }))
     }
 }
@@ -219,6 +244,15 @@ struct CachedMetadataReader {
     location: object_store::path::Path,
     metadata: Arc<ParquetMetaData>,
     metrics: ParquetFileMetrics,
+    io_stats: Arc<ReadIoStats>,
+}
+
+fn record_io(stats: &ReadIoStats, dur: std::time::Duration) {
+    use std::sync::atomic::Ordering;
+    let ns = dur.as_nanos() as u64;
+    stats.total_ns.fetch_add(ns, Ordering::Relaxed);
+    stats.count.fetch_add(1, Ordering::Relaxed);
+    stats.max_ns.fetch_max(ns, Ordering::Relaxed);
 }
 
 impl AsyncFileReader for CachedMetadataReader {
@@ -231,11 +265,15 @@ impl AsyncFileReader for CachedMetadataReader {
             .add((range.end - range.start) as usize);
         let store = Arc::clone(&self.store);
         let location = self.location.clone();
+        let io_stats = Arc::clone(&self.io_stats);
         async move {
-            store
+            let t0 = std::time::Instant::now();
+            let r = store
                 .get_range(&location, range)
                 .await
-                .map_err(|e| datafusion::parquet::errors::ParquetError::External(Box::new(e)))
+                .map_err(|e| datafusion::parquet::errors::ParquetError::External(Box::new(e)));
+            record_io(&io_stats, t0.elapsed());
+            r
         }
         .boxed()
     }
@@ -248,11 +286,15 @@ impl AsyncFileReader for CachedMetadataReader {
         self.metrics.bytes_scanned.add(total as usize);
         let store = Arc::clone(&self.store);
         let location = self.location.clone();
+        let io_stats = Arc::clone(&self.io_stats);
         async move {
-            store
+            let t0 = std::time::Instant::now();
+            let r = store
                 .get_ranges(&location, &ranges)
                 .await
-                .map_err(|e| datafusion::parquet::errors::ParquetError::External(Box::new(e)))
+                .map_err(|e| datafusion::parquet::errors::ParquetError::External(Box::new(e)));
+            record_io(&io_stats, t0.elapsed());
+            r
         }
         .boxed()
     }
