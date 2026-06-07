@@ -457,6 +457,8 @@ struct IndexedStream {
     row_id_output_index: Option<usize>,
     /// Timestamp of the last poll_next return — used to measure inter-poll gap.
     last_poll_ended: Option<Instant>,
+    pending_poll_count: u64,
+    pending_poll_nanos: u64,
 }
 
 impl IndexedStream {
@@ -521,6 +523,8 @@ impl IndexedStream {
             emit_row_ids,
             row_id_output_index,
             last_poll_ended: None,
+            pending_poll_count: 0,
+            pending_poll_nanos: 0,
         }
     }
 
@@ -705,6 +709,9 @@ impl Stream for IndexedStream {
         // time downstream work.
         let poll_start = Instant::now();
 
+        if let Some(ref c) = self.metrics.poll_count {
+            c.add(1);
+        }
         if let Some(last_ended) = self.last_poll_ended {
             if let Some(ref t) = self.metrics.inter_poll_gap {
                 t.add_duration(poll_start.duration_since(last_ended));
@@ -749,6 +756,11 @@ impl IndexedStream {
 
             // 2. If upstream is done and coalescer has drained, we're done.
             if self.coalescer_finished && self.batch_coalescer.is_empty() {
+                native_bridge_common::log_info!(
+                    "[indexed-stream] pending_polls={} pending_time={:.3}ms",
+                    self.pending_poll_count,
+                    self.pending_poll_nanos as f64 / 1_000_000.0
+                );
                 return Poll::Ready(None);
             }
 
@@ -836,7 +848,11 @@ impl IndexedStream {
                         self.mask_offset = 0;
                         self.batch_offset = 0;
                     }
-                    Poll::Pending => return Poll::Pending,
+                    Poll::Pending => {
+                        self.pending_poll_count += 1;
+                        self.pending_poll_nanos += t_poll.elapsed().as_nanos() as u64;
+                        return Poll::Pending;
+                    }
                 }
             }
 

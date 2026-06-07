@@ -932,7 +932,7 @@ async unsafe fn execute_indexed_with_context_inner(
 
     let t_step = std::time::Instant::now();
     let logical_plan = from_substrait_plan(&ctx.state(), &plan).await?;
-    log_debug!("DataFusion logical plan:\n{}", logical_plan.display_indent());
+    native_bridge_common::log_info!("DataFusion logical plan:\n{}", logical_plan.display_indent());
     let dataframe = ctx.execute_logical_plan(logical_plan).await?;
     let physical_plan = dataframe.create_physical_plan().await?;
     // Retag bit-compatible Int↔UInt output mismatches to match the substrait-declared
@@ -941,14 +941,14 @@ async unsafe fn execute_indexed_with_context_inner(
     // and producer-side batches agree by construction (see crate::relabel_exec).
     let target_schema = crate::schema_coerce::coerce_inferred_schema(physical_plan.schema());
     let physical_plan = crate::relabel_exec::wrap_if_relabel_needed(physical_plan, target_schema)?;
-    log_debug!("DataFusion physical plan:\n{}", displayable(physical_plan.as_ref()).indent(true));
+    native_bridge_common::log_info!("DataFusion physical plan:\n{}", displayable(physical_plan.as_ref()).indent(true));
     native_bridge_common::log_info!(
         "[execute_indexed_with_context_inner] time for from_substrait + execute_logical_plan + create_physical_plan: elapsed={:.3}ms",
         t_step.elapsed().as_nanos() as f64 / 1_000_000.0
     );
 
     let t_step = std::time::Instant::now();
-    let df_stream = execute_stream(physical_plan, ctx.task_ctx())
+    let df_stream = execute_stream(physical_plan.clone(), ctx.task_ctx())
         .map_err(|e| DataFusionError::Execution(format!("execute_stream: {}", e)))?;
 
     let (cross_rt_stream, abort_handle) =
@@ -960,7 +960,8 @@ async unsafe fn execute_indexed_with_context_inner(
 
     let schema = cross_rt_stream.schema();
     let wrapped = RecordBatchStreamAdapter::new(schema, cross_rt_stream);
-    let stream_handle = crate::api::QueryStreamHandle::with_session_context(wrapped, query_context, ctx, Some(permit));
+    let mut stream_handle = crate::api::QueryStreamHandle::with_session_context(wrapped, query_context, ctx, Some(permit));
+    stream_handle.set_physical_plan(physical_plan);
     native_bridge_common::log_info!(
         "[execute_indexed_with_context_inner] time for execute_stream + CrossRtStream wrap: elapsed={:.3}ms total_inner={:.3}ms",
         t_step.elapsed().as_nanos() as f64 / 1_000_000.0,

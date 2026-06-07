@@ -248,11 +248,18 @@ impl AsyncFileReader for CachedMetadataReader {
         self.metrics.bytes_scanned.add(total as usize);
         let store = Arc::clone(&self.store);
         let location = self.location.clone();
+        let num_ranges = ranges.len();
         async move {
-            store
+            let t = std::time::Instant::now();
+            let result = store
                 .get_ranges(&location, &ranges)
                 .await
-                .map_err(|e| datafusion::parquet::errors::ParquetError::External(Box::new(e)))
+                .map_err(|e| datafusion::parquet::errors::ParquetError::External(Box::new(e)));
+            native_bridge_common::log_info!(
+                "[object-store] get_ranges: num_ranges={} bytes={} elapsed={:.3}ms",
+                num_ranges, total, t.elapsed().as_nanos() as f64 / 1_000_000.0
+            );
+            result
         }
         .boxed()
     }

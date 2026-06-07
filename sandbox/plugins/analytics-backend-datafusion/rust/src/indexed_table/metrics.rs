@@ -109,6 +109,8 @@ pub struct StreamMetrics {
     /// Cumulative time between poll_next calls — the time the stream is NOT
     /// being polled (scheduling, upstream operator processing, chunk transitions).
     pub inter_poll_gap: Option<Time>,
+    /// Number of times poll_next was called on this stream.
+    pub poll_count: Option<Count>,
 }
 
 impl StreamMetrics {
@@ -149,6 +151,7 @@ impl StreamMetrics {
             init_prefetch_time: None,
             inner_parquet_metrics: None,
             inter_poll_gap: None,
+            poll_count: None,
         }
     }
 }
@@ -188,6 +191,7 @@ pub struct PartitionMetrics {
     pub parquet_poll_time: Time,
     pub init_prefetch_time: Time,
     pub inter_poll_gap: Time,
+    pub poll_count: Count,
 }
 
 impl PartitionMetrics {
@@ -233,6 +237,7 @@ impl PartitionMetrics {
             init_prefetch_time: MetricBuilder::new(metrics)
                 .subset_time("init_prefetch_time", partition),
             inter_poll_gap: MetricBuilder::new(metrics).subset_time("inter_poll_gap", partition),
+            poll_count: counter("poll_count"),
         }
     }
 
@@ -276,6 +281,7 @@ impl PartitionMetrics {
             init_prefetch_time: Some(self.init_prefetch_time),
             inner_parquet_metrics,
             inter_poll_gap: Some(self.inter_poll_gap),
+            poll_count: Some(self.poll_count),
         }
     }
 }

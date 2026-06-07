@@ -83,6 +83,9 @@ pub struct QueryStreamHandle {
     /// Concurrency gate permit — held for the query's entire lifetime.
     /// Released on drop, which frees partition budget for other queries.
     _concurrency_permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    /// Physical plan root — retained so we can dump per-operator metrics
+    /// at stream exhaustion (EXPLAIN ANALYZE equivalent).
+    physical_plan: Option<Arc<dyn datafusion::physical_plan::ExecutionPlan>>,
 }
 
 impl QueryStreamHandle {
@@ -104,6 +107,7 @@ impl QueryStreamHandle {
             _session_ctx: None,
             has_views,
             _concurrency_permit: permit,
+            physical_plan: None,
         }
     }
 
@@ -120,6 +124,171 @@ impl QueryStreamHandle {
             _session_ctx: Some(ctx),
             has_views,
             _concurrency_permit: permit,
+            physical_plan: None,
+        }
+    }
+
+    pub fn set_physical_plan(&mut self, plan: Arc<dyn datafusion::physical_plan::ExecutionPlan>) {
+        self.physical_plan = Some(plan);
+    }
+
+    pub fn dump_plan_metrics(&self) {
+        if let Some(ref plan) = self.physical_plan {
+            Self::dump_node_metrics(plan.as_ref(), 0);
+        }
+    }
+
+    fn dump_node_metrics(plan: &dyn datafusion::physical_plan::ExecutionPlan, indent: usize) {
+        let name = plan.name();
+        let pad = " ".repeat(indent);
+
+        // For DataSourceExec children, aggregate instead of printing each one.
+        let children = plan.children();
+        let all_datasource = !children.is_empty()
+            && children.iter().all(|c| c.name() == "DataSourceExec");
+
+        if all_datasource {
+            // Summarize: sum up key timing/row metrics across all children.
+            let mut total_elapsed_ns: u64 = 0;
+            let mut total_output_rows: usize = 0;
+            let mut total_bytes_scanned: usize = 0;
+            let mut total_scanning_time_ns: u64 = 0;
+            let count = children.len();
+            for child in &children {
+                if let Some(metrics) = child.metrics() {
+                    total_elapsed_ns += metrics.elapsed_compute().unwrap_or_default() as u64;
+                    total_output_rows += metrics.output_rows().unwrap_or_default();
+                    for m in metrics.iter() {
+                        let mv = m.value();
+                        match m.value().name() {
+                            "bytes_scanned" => {
+                                if let datafusion::physical_plan::metrics::MetricValue::Count { count, .. } = mv {
+                                    total_bytes_scanned += count.value();
+                                }
+                            }
+                            "time_elapsed_scanning_total" => {
+                                if let datafusion::physical_plan::metrics::MetricValue::Time { time, .. } = mv {
+                                    total_scanning_time_ns += time.value() as u64;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            let compact = Self::compact_metrics(plan);
+            native_bridge_common::log_info!(
+                "[explain-analyze] {}{}: {}",
+                pad, name, compact
+            );
+            native_bridge_common::log_info!(
+                "[explain-analyze] {}  DataSourceExec x{}: elapsed_compute={:.3}ms output_rows={} bytes_scanned={} scanning_total={:.3}ms",
+                pad,
+                count,
+                total_elapsed_ns as f64 / 1_000_000.0,
+                total_output_rows,
+                total_bytes_scanned,
+                total_scanning_time_ns as f64 / 1_000_000.0,
+            );
+        } else {
+            let compact = Self::compact_metrics(plan);
+            native_bridge_common::log_info!(
+                "[explain-analyze] {}{}: {}",
+                pad, name, compact
+            );
+            for child in &children {
+                Self::dump_node_metrics(child.as_ref(), indent + 2);
+            }
+        }
+    }
+
+    fn compact_metrics(plan: &dyn datafusion::physical_plan::ExecutionPlan) -> String {
+        let Some(metrics) = plan.metrics() else {
+            return "no metrics".to_string();
+        };
+        let mut parts: Vec<String> = Vec::new();
+        let elapsed = metrics.elapsed_compute().unwrap_or_default();
+        if elapsed > 0 {
+            parts.push(format!("elapsed_compute={:.3}ms", elapsed as f64 / 1_000_000.0));
+        }
+        let rows = metrics.output_rows().unwrap_or_default();
+        if rows > 0 {
+            parts.push(format!("output_rows={}", rows));
+        }
+        // Extract our custom metrics by name.
+        let custom_keys = [
+            "inter_poll_gap", "poll_count", "index_query_time", "parquet_read_time",
+            "prefetch_wait_time", "rows_matched", "row_groups_processed",
+            "row_groups_skipped", "rg_bloom_pruned", "ffm_collector_calls",
+            "batches_produced", "init_prefetch_time", "coalesce_time",
+            "build_mask_time", "filter_record_batch_time", "parquet_poll_time",
+        ];
+        // Inner parquet metrics are repeated per-RG — aggregate them.
+        let inner_parquet_keys: &[&str] = &[
+            "time_elapsed_opening", "time_elapsed_scanning_until_data",
+            "time_elapsed_scanning_total", "time_elapsed_processing",
+            "bytes_scanned",
+        ];
+        let mut inner_time_sums: std::collections::HashMap<&str, f64> = std::collections::HashMap::new();
+        let mut inner_count_sums: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+
+        for m in metrics.iter() {
+            let name = m.value().name();
+            if custom_keys.contains(&name) {
+                match m.value() {
+                    datafusion::physical_plan::metrics::MetricValue::Time { time, .. } => {
+                        let ns = time.value() as f64;
+                        if ns > 0.0 {
+                            parts.push(format!("{}={:.3}ms", name, ns / 1_000_000.0));
+                        }
+                    }
+                    datafusion::physical_plan::metrics::MetricValue::Count { count, .. } => {
+                        let v = count.value();
+                        if v > 0 {
+                            parts.push(format!("{}={}", name, v));
+                        }
+                    }
+                    _ => {}
+                }
+            } else if inner_parquet_keys.contains(&name) {
+                match m.value() {
+                    datafusion::physical_plan::metrics::MetricValue::Time { time, .. } => {
+                        *inner_time_sums.entry(name).or_insert(0.0) += time.value() as f64;
+                    }
+                    datafusion::physical_plan::metrics::MetricValue::Count { count, .. } => {
+                        *inner_count_sums.entry(name).or_insert(0) += count.value();
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // Emit aggregated inner parquet metrics in a stable order.
+        for &key in inner_parquet_keys {
+            if let Some(&ns) = inner_time_sums.get(key) {
+                if ns > 0.0 {
+                    parts.push(format!("{}={:.3}ms", key, ns / 1_000_000.0));
+                }
+            }
+            if let Some(&v) = inner_count_sums.get(key) {
+                if v > 0 {
+                    parts.push(format!("{}={}", key, v));
+                }
+            }
+        }
+        // Derived: io_wait = scanning_until_data - processing
+        if let (Some(&until_data), Some(&processing)) = (
+            inner_time_sums.get("time_elapsed_scanning_until_data"),
+            inner_time_sums.get("time_elapsed_processing"),
+        ) {
+            let io_wait = until_data - processing;
+            if io_wait > 0.0 {
+                parts.push(format!("io_wait={:.3}ms", io_wait / 1_000_000.0));
+            }
+        }
+        if parts.is_empty() {
+            "no metrics".to_string()
+        } else {
+            parts.join(" | ")
         }
     }
 }
@@ -944,6 +1113,7 @@ pub async unsafe fn stream_next(
                 poll_elapsed.as_nanos() as f64 / 1_000_000.0,
                 t_total.elapsed().as_nanos() as f64 / 1_000_000.0
             );
+            handle.dump_plan_metrics();
             Ok(0)
         }
     }

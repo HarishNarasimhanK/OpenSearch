@@ -577,17 +577,19 @@ impl Drop for AccumulatingStream {
         let index_time = to_ms(&m.index_time);
         let init_prefetch = to_ms(&m.init_prefetch_time);
         let inter_poll_gap = to_ms(&m.inter_poll_gap);
+        let poll_count = m.poll_count.as_ref().map_or(0, |c| c.value());
         // fg_pct: foreground in-poll work vs elapsed_compute (active poll time).
         // init_prefetch runs inside the first poll (so inside elapsed_compute),
         // so it's part of the fg sum.
         let fg = parquet_poll + parquet_time + on_batch_mask + build_mask + filter_rb + init_prefetch;
         let fg_pct = if elapsed > 0.0 { fg / elapsed * 100.0 } else { 0.0 };
         native_bridge_common::log_info!(
-            "[stream-drop] wall={:.3}ms elapsed={:.3}ms prefetch_wait={:.3}ms inter_poll_gap={:.3}ms index_time={:.3}ms | parquet_poll={:.3}ms parquet_time={:.3}ms on_batch_mask={:.3}ms build_mask={:.3}ms filter_rb={:.3}ms init_prefetch={:.3}ms | fg={:.3}ms fg_pct={:.1}% (of elapsed)",
+            "[stream-drop] wall={:.3}ms elapsed={:.3}ms prefetch_wait={:.3}ms inter_poll_gap={:.3}ms poll_count={} index_time={:.3}ms | parquet_poll={:.3}ms parquet_time={:.3}ms on_batch_mask={:.3}ms build_mask={:.3}ms filter_rb={:.3}ms init_prefetch={:.3}ms | fg={:.3}ms fg_pct={:.1}% (of elapsed)",
             wall,
             elapsed,
             prefetch_wait,
             inter_poll_gap,
+            poll_count,
             index_time,
             parquet_poll,
             parquet_time,
