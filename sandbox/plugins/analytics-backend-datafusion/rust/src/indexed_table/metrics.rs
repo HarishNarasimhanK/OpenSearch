@@ -106,6 +106,8 @@ pub struct StreamMetrics {
     pub init_prefetch_time: Option<Time>,
     /// Accumulated inner `DataSourceExec` parquet metrics (shared across partitions).
     pub inner_parquet_metrics: Option<Arc<std::sync::Mutex<Vec<MetricsSet>>>>,
+    /// Shared object-store IO stats accumulator across all RGs.
+    pub io_stats: Option<Arc<super::parquet_bridge::ReadIoStats>>,
     /// Cumulative time between poll_next calls — the time the stream is NOT
     /// being polled (scheduling, upstream operator processing, chunk transitions).
     pub inter_poll_gap: Option<Time>,
@@ -150,6 +152,7 @@ impl StreamMetrics {
             parquet_poll_time: None,
             init_prefetch_time: None,
             inner_parquet_metrics: None,
+            io_stats: None,
             inter_poll_gap: None,
             poll_count: None,
         }
@@ -245,6 +248,7 @@ impl PartitionMetrics {
     pub fn into_stream_metrics(
         self,
         inner_parquet_metrics: Option<Arc<std::sync::Mutex<Vec<MetricsSet>>>>,
+        io_stats: Option<Arc<super::parquet_bridge::ReadIoStats>>,
     ) -> StreamMetrics {
         StreamMetrics {
             output_rows: Some(self.output_rows),
@@ -280,6 +284,7 @@ impl PartitionMetrics {
             parquet_poll_time: Some(self.parquet_poll_time),
             init_prefetch_time: Some(self.init_prefetch_time),
             inner_parquet_metrics,
+            io_stats,
             inter_poll_gap: Some(self.inter_poll_gap),
             poll_count: Some(self.poll_count),
         }

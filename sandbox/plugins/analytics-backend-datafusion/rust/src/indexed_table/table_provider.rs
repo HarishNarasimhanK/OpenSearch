@@ -408,8 +408,9 @@ impl ExecutionPlan for QueryShardExec {
         );
 
         let pmetrics = PartitionMetrics::new(&self.metrics, partition);
+        let io_stats = Arc::new(super::parquet_bridge::ReadIoStats::new());
         let stream_metrics =
-            pmetrics.into_stream_metrics(Some(Arc::clone(&self.inner_parquet_metrics)));
+            pmetrics.into_stream_metrics(Some(Arc::clone(&self.inner_parquet_metrics)), Some(Arc::clone(&io_stats)));
         let stream_metrics_for_drop = stream_metrics.clone();
 
         // Build one IndexedExec per SegmentChunk and execute it immediately,
@@ -600,6 +601,15 @@ impl Drop for AccumulatingStream {
             fg,
             fg_pct,
         );
+        if let Some(ref io_stats) = m.io_stats {
+            let io_total_ms = io_stats.total_ns.load(std::sync::atomic::Ordering::Relaxed) as f64 / 1_000_000.0;
+            let io_calls = io_stats.call_count.load(std::sync::atomic::Ordering::Relaxed);
+            let io_bytes = io_stats.total_bytes.load(std::sync::atomic::Ordering::Relaxed);
+            native_bridge_common::log_info!(
+                "[stream-drop] object_store_io: total_time={:.3}ms calls={} bytes={}",
+                io_total_ms, io_calls, io_bytes,
+            );
+        }
         crate::search_stats::accumulate(&self.stream_metrics);
     }
 }

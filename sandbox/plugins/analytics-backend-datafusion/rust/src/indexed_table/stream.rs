@@ -538,6 +538,7 @@ impl IndexedStream {
             metadata: Arc::clone(&self.metadata),
             projection: self.projection.clone(),
             predicate: self.predicate.clone(),
+            io_stats: self.metrics.io_stats.clone(),
         }
     }
 

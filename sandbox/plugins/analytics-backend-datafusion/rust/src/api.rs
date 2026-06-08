@@ -227,7 +227,9 @@ impl QueryStreamHandle {
         let inner_parquet_keys: &[&str] = &[
             "time_elapsed_opening", "time_elapsed_scanning_until_data",
             "time_elapsed_scanning_total", "time_elapsed_processing",
-            "bytes_scanned",
+            "bytes_scanned", "page_index_rows_filtered",
+            "pushdown_rows_filtered", "metadata_load_time",
+            "bloom_filter_eval_time",
         ];
         let mut inner_time_sums: std::collections::HashMap<&str, f64> = std::collections::HashMap::new();
         let mut inner_count_sums: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();

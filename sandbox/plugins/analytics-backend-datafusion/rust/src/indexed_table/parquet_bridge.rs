@@ -19,6 +19,7 @@
 //! the vanilla path uses (file://, s3://, etc.).
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::common::Result;
@@ -43,6 +44,24 @@ use futures::future::BoxFuture;
 use futures::FutureExt;
 use object_store::{ObjectStore, ObjectStoreExt};
 use prost::bytes::Bytes;
+
+// ── Object-Store IO Stats ────────────────────────────────────────────
+
+/// Shared atomic accumulator for actual object-store read wall-time.
+/// Passed into every `CachedMetadataReader` so IO time is captured
+/// regardless of whether it happens between polls or within polls.
+#[derive(Debug, Default)]
+pub struct ReadIoStats {
+    pub total_ns: AtomicU64,
+    pub call_count: AtomicU64,
+    pub total_bytes: AtomicU64,
+}
+
+impl ReadIoStats {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
 
 // ── Parquet Metadata Loading ─────────────────────────────────────────
 
@@ -85,6 +104,8 @@ pub struct RowGroupStreamConfig {
     pub metadata: Arc<ParquetMetaData>,
     pub projection: Option<Vec<usize>>,
     pub predicate: Option<Arc<dyn datafusion::physical_expr::PhysicalExpr>>,
+    /// Shared IO stats accumulator — records actual object-store read time.
+    pub io_stats: Option<Arc<ReadIoStats>>,
 }
 
 /// Create a stream that reads a single row group using `RowSelection`.
@@ -146,6 +167,7 @@ fn create_stream_with_access_plan(
     let reader_factory = Arc::new(CachedMetadataReaderFactory::new(
         Arc::clone(&config.store),
         Arc::clone(&config.metadata),
+        config.io_stats.clone(),
     )) as Arc<dyn ParquetFileReaderFactory>;
 
     let mut parquet_source = ParquetSource::new(config.full_schema.clone())
@@ -187,11 +209,12 @@ fn create_stream_with_access_plan(
 pub struct CachedMetadataReaderFactory {
     store: Arc<dyn ObjectStore>,
     metadata: Arc<ParquetMetaData>,
+    io_stats: Option<Arc<ReadIoStats>>,
 }
 
 impl CachedMetadataReaderFactory {
-    pub fn new(store: Arc<dyn ObjectStore>, metadata: Arc<ParquetMetaData>) -> Self {
-        Self { store, metadata }
+    pub fn new(store: Arc<dyn ObjectStore>, metadata: Arc<ParquetMetaData>, io_stats: Option<Arc<ReadIoStats>>) -> Self {
+        Self { store, metadata, io_stats }
     }
 }
 
@@ -210,6 +233,7 @@ impl ParquetFileReaderFactory for CachedMetadataReaderFactory {
             location: file.object_meta.location.clone(),
             metadata: Arc::clone(&self.metadata),
             metrics: file_metrics,
+            io_stats: self.io_stats.clone(),
         }))
     }
 }
@@ -219,6 +243,7 @@ struct CachedMetadataReader {
     location: object_store::path::Path,
     metadata: Arc<ParquetMetaData>,
     metrics: ParquetFileMetrics,
+    io_stats: Option<Arc<ReadIoStats>>,
 }
 
 impl AsyncFileReader for CachedMetadataReader {
@@ -226,16 +251,24 @@ impl AsyncFileReader for CachedMetadataReader {
         &mut self,
         range: std::ops::Range<u64>,
     ) -> BoxFuture<'_, datafusion::parquet::errors::Result<Bytes>> {
-        self.metrics
-            .bytes_scanned
-            .add((range.end - range.start) as usize);
+        let byte_count = (range.end - range.start) as usize;
+        self.metrics.bytes_scanned.add(byte_count);
         let store = Arc::clone(&self.store);
         let location = self.location.clone();
+        let io_stats = self.io_stats.clone();
         async move {
-            store
+            let t = std::time::Instant::now();
+            let result = store
                 .get_range(&location, range)
                 .await
-                .map_err(|e| datafusion::parquet::errors::ParquetError::External(Box::new(e)))
+                .map_err(|e| datafusion::parquet::errors::ParquetError::External(Box::new(e)));
+            if let Some(ref stats) = io_stats {
+                let elapsed_ns = t.elapsed().as_nanos() as u64;
+                stats.total_ns.fetch_add(elapsed_ns, Ordering::Relaxed);
+                stats.call_count.fetch_add(1, Ordering::Relaxed);
+                stats.total_bytes.fetch_add(byte_count as u64, Ordering::Relaxed);
+            }
+            result
         }
         .boxed()
     }
@@ -248,17 +281,19 @@ impl AsyncFileReader for CachedMetadataReader {
         self.metrics.bytes_scanned.add(total as usize);
         let store = Arc::clone(&self.store);
         let location = self.location.clone();
-        let num_ranges = ranges.len();
+        let io_stats = self.io_stats.clone();
         async move {
             let t = std::time::Instant::now();
             let result = store
                 .get_ranges(&location, &ranges)
                 .await
                 .map_err(|e| datafusion::parquet::errors::ParquetError::External(Box::new(e)));
-            native_bridge_common::log_info!(
-                "[object-store] get_ranges: num_ranges={} bytes={} elapsed={:.3}ms",
-                num_ranges, total, t.elapsed().as_nanos() as f64 / 1_000_000.0
-            );
+            if let Some(ref stats) = io_stats {
+                let elapsed_ns = t.elapsed().as_nanos() as u64;
+                stats.total_ns.fetch_add(elapsed_ns, Ordering::Relaxed);
+                stats.call_count.fetch_add(1, Ordering::Relaxed);
+                stats.total_bytes.fetch_add(total, Ordering::Relaxed);
+            }
             result
         }
         .boxed()
