@@ -21,7 +21,6 @@
 
 use std::sync::Arc;
 
-use native_bridge_common::log_debug;
 use datafusion::{
     physical_plan::displayable,
     physical_plan::execute_stream,
@@ -440,10 +439,16 @@ pub async unsafe fn execute_indexed_with_context(
     let context_id = handle.query_context.context_id();
     let token = crate::query_tracker::get_cancellation_token(context_id);
 
+    let plan_setup_start = std::time::Instant::now();
     let query_future = execute_indexed_with_context_inner(handle, substrait_bytes, cpu_executor, permit);
-    crate::cancellation::cancellable(token.as_ref(), context_id, query_future)
+    let result = crate::cancellation::cancellable(token.as_ref(), context_id, query_future)
         .await
-        .map_err(DataFusionError::Execution)
+        .map_err(DataFusionError::Execution);
+    native_bridge_common::log_info!(
+        "[execute_indexed_with_context] plan_setup: context_id={} elapsed={:.3}ms success={}",
+        context_id, plan_setup_start.elapsed().as_nanos() as f64 / 1_000_000.0, result.is_ok()
+    );
+    result
 }
 
 async unsafe fn execute_indexed_with_context_inner(
@@ -875,16 +880,12 @@ async unsafe fn execute_indexed_with_context_inner(
     ctx.register_table(&table_name, provider)?;
 
     let logical_plan = from_substrait_plan(&ctx.state(), &plan).await?;
-    log_debug!("DataFusion logical plan:\n{}", logical_plan.display_indent());
+    native_bridge_common::log_info!("[indexed] logical plan:\n{}", logical_plan.display_indent());
     let dataframe = ctx.execute_logical_plan(logical_plan).await?;
     let physical_plan = dataframe.create_physical_plan().await?;
-    // Retag bit-compatible Int↔UInt output mismatches to match the substrait-declared
-    // types. The target is schema_coerce::coerce_inferred_schema(physical_schema) — same
-    // narrowing the partition-stream registration uses, so consumer-side StreamingTable
-    // and producer-side batches agree by construction (see crate::relabel_exec).
     let target_schema = crate::schema_coerce::coerce_inferred_schema(physical_plan.schema());
     let physical_plan = crate::relabel_exec::wrap_if_relabel_needed(physical_plan, target_schema)?;
-    log_debug!("DataFusion physical plan:\n{}", displayable(physical_plan.as_ref()).indent(true));
+    native_bridge_common::log_info!("[indexed] physical plan:\n{}", displayable(physical_plan.as_ref()).indent(true));
     // Clone the Arc before `execute_stream` consumes the plan, so the stream
     // handle can dump it WITH live metrics on drop (post-execution).
     let diagnostic_plan = Arc::clone(&physical_plan);

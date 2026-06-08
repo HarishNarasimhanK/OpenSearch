@@ -754,8 +754,12 @@ impl Stream for IndexedStream {
         }
 
         if !self.initialized {
+            let t_init = Instant::now();
             self.index_reader.init_prefetch();
             self.initialized = true;
+            if let Some(ref t) = self.metrics.init_prefetch_time {
+                t.add_duration(t_init.elapsed());
+            }
         }
 
         let result = self.as_mut().poll_inner(cx);

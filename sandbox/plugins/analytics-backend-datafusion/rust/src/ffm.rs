@@ -226,12 +226,19 @@ pub unsafe extern "C" fn df_execute_query(
     // Pointer to a `WireDatafusionQueryConfig`
     query_config_ptr: i64,
 ) -> i64 {
+    let t_e2e = std::time::Instant::now();
     let mgr = get_rt_manager()?;
     let table_name = str_from_raw(table_name_ptr, table_name_len)
         .map_err(|e| format!("df_execute_query: {}", e))?;
     let plan_bytes = slice::from_raw_parts(plan_ptr, plan_len as usize);
     let query_config =
         crate::datafusion_query_config::DatafusionQueryConfig::from_ffm_ptr(query_config_ptr);
+
+    native_bridge_common::log_info!(
+        "[df_execute_query] table={} plan_len={} context_id={}",
+        table_name, plan_len, context_id
+    );
+
     // Copy the plan bytes so the spawned future can own them (`cpu_executor.spawn`
     // requires `'static`). The `shard_view_ptr`, `runtime_ptr` are raw pointers
     // held live by the caller for the duration of the FFM downcall — safe to
@@ -249,7 +256,7 @@ pub unsafe extern "C" fn df_execute_query(
     // all the work. The IO runtime still drives the outer `timed_block_on`
     // (bridging the synchronous FFM call to the async spawn handle); only
     // the plan construction and stream wrapping hop to CPU.
-    timed_block_on(&mgr.io_runtime, "execute_query", async move {
+    let result = timed_block_on(&mgr.io_runtime, "execute_query", async move {
         let inner_fut = crate::task_monitors::query_execution_monitor().instrument(async move {
             api::execute_query(
                 shard_view_ptr,
@@ -269,7 +276,14 @@ pub unsafe extern "C" fn df_execute_query(
             ))),
         }
     })
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string());
+
+    native_bridge_common::log_info!(
+        "[df_execute_query] done: e2e={:.3}ms success={}",
+        t_e2e.elapsed().as_nanos() as f64 / 1_000_000.0,
+        result.is_ok()
+    );
+    result
 }
 
 /// Fetch specific rows by global row ID — QTF fetch phase.

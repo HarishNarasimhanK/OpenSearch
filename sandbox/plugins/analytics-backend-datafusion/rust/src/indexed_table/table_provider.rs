@@ -518,6 +518,7 @@ impl ExecutionPlan for QueryShardExec {
         Ok(Box::pin(AccumulatingStream {
             inner,
             stream_metrics: stream_metrics_for_drop,
+            created_at: std::time::Instant::now(),
         }))
     }
 }
@@ -525,6 +526,7 @@ impl ExecutionPlan for QueryShardExec {
 struct AccumulatingStream {
     inner: SendableRecordBatchStream,
     stream_metrics: StreamMetrics,
+    created_at: std::time::Instant,
 }
 
 impl Stream for AccumulatingStream {
@@ -543,6 +545,25 @@ impl RecordBatchStream for AccumulatingStream {
 
 impl Drop for AccumulatingStream {
     fn drop(&mut self) {
+        let m = &self.stream_metrics;
+        let to_ms = |t: &Option<datafusion::physical_plan::metrics::Time>| -> f64 {
+            t.as_ref().map_or(0usize, |v| v.value()) as f64 / 1_000_000.0
+        };
+        let wall = self.created_at.elapsed().as_nanos() as f64 / 1_000_000.0;
+        let elapsed = to_ms(&m.elapsed_compute);
+        let inter_poll_gap = to_ms(&m.inter_poll_gap);
+        let parquet_poll = to_ms(&m.parquet_poll_time);
+        let index_time = to_ms(&m.index_time);
+        let prefetch_wait = to_ms(&m.prefetch_wait_time);
+        let init_prefetch = to_ms(&m.init_prefetch_time);
+        let poll_count = m.poll_count.as_ref().map_or(0, |c| c.value());
+        native_bridge_common::log_info!(
+            "[stream-wall] wall={:.3}ms elapsed={:.3}ms inter_poll_gap={:.3}ms \
+             parquet_poll={:.3}ms index_time={:.3}ms prefetch_wait={:.3}ms \
+             init_prefetch={:.3}ms poll_count={}",
+            wall, elapsed, inter_poll_gap, parquet_poll, index_time,
+            prefetch_wait, init_prefetch, poll_count,
+        );
         crate::search_stats::accumulate(&self.stream_metrics);
     }
 }

@@ -100,6 +100,10 @@ pub struct StreamMetrics {
     /// Time spent polling the inner parquet stream (pull decoded
     /// batch), isolating decode from our own processing.
     pub parquet_poll_time: Option<Time>,
+    /// Time spent in the one-time `index_reader.init_prefetch()` call
+    /// (kicks off the first row group's prefetch). Runs inside the first
+    /// poll, so it's part of `elapsed_compute`.
+    pub init_prefetch_time: Option<Time>,
     /// Count of row groups skipped by the runtime dynamic-filter pruner at the
     /// PREFETCH phase — before the Lucene/FFM eval ran. This saves both the
     /// index eval and the parquet decode. Zero when no dynamic filter was pushed.
@@ -173,6 +177,7 @@ impl StreamMetrics {
             mask_slice_time: None,
             projection_fixup_time: None,
             parquet_poll_time: None,
+            init_prefetch_time: None,
             dynamic_filter_rg_pruned_at_prefetch: None,
             dynamic_filter_rg_pruned_at_poll: None,
             work_stolen_chunks: None,
@@ -219,6 +224,7 @@ pub struct PartitionMetrics {
     pub mask_slice_time: Time,
     pub projection_fixup_time: Time,
     pub parquet_poll_time: Time,
+    pub init_prefetch_time: Time,
     pub dynamic_filter_rg_pruned_at_prefetch: Count,
     pub dynamic_filter_rg_pruned_at_poll: Count,
     pub work_stolen_chunks: Count,
@@ -267,6 +273,8 @@ impl PartitionMetrics {
                 .subset_time("projection_fixup_time", partition),
             parquet_poll_time: MetricBuilder::new(metrics)
                 .subset_time("parquet_poll_time", partition),
+            init_prefetch_time: MetricBuilder::new(metrics)
+                .subset_time("init_prefetch_time", partition),
             dynamic_filter_rg_pruned_at_prefetch: counter("dynamic_filter_rg_pruned_at_prefetch"),
             dynamic_filter_rg_pruned_at_poll: counter("dynamic_filter_rg_pruned_at_poll"),
             work_stolen_chunks: counter("work_stolen_chunks"),
@@ -313,6 +321,7 @@ impl PartitionMetrics {
             mask_slice_time: Some(self.mask_slice_time),
             projection_fixup_time: Some(self.projection_fixup_time),
             parquet_poll_time: Some(self.parquet_poll_time),
+            init_prefetch_time: Some(self.init_prefetch_time),
             dynamic_filter_rg_pruned_at_prefetch: Some(self.dynamic_filter_rg_pruned_at_prefetch),
             dynamic_filter_rg_pruned_at_poll: Some(self.dynamic_filter_rg_pruned_at_poll),
             work_stolen_chunks: Some(self.work_stolen_chunks),

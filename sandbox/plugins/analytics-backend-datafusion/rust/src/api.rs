@@ -146,6 +146,103 @@ impl QueryStreamHandle {
         self
     }
 
+    /// Walk the plan tree and log a compact explain-analyze summary.
+    pub fn dump_plan_metrics(&self) {
+        if let Some(ref plan) = self.diagnostic_plan {
+            Self::dump_node_metrics(plan.as_ref(), 0);
+        }
+    }
+
+    fn dump_node_metrics(plan: &dyn datafusion::physical_plan::ExecutionPlan, indent: usize) {
+        let name = plan.name();
+        let pad = " ".repeat(indent);
+        let children = plan.children();
+        let compact = Self::compact_metrics(plan);
+        native_bridge_common::log_info!("[explain-analyze] {}{}: {}", pad, name, compact);
+        for child in &children {
+            Self::dump_node_metrics(child.as_ref(), indent + 2);
+        }
+    }
+
+    fn compact_metrics(plan: &dyn datafusion::physical_plan::ExecutionPlan) -> String {
+        let Some(metrics) = plan.metrics() else {
+            return "no metrics".to_string();
+        };
+        let mut parts: Vec<String> = Vec::new();
+        let elapsed = metrics.elapsed_compute().unwrap_or_default();
+        if elapsed > 0 {
+            parts.push(format!("elapsed_compute={:.3}ms", elapsed as f64 / 1_000_000.0));
+        }
+        let rows = metrics.output_rows().unwrap_or_default();
+        if rows > 0 {
+            parts.push(format!("output_rows={}", rows));
+        }
+        let custom_keys = [
+            "inter_poll_gap", "poll_count", "index_query_time", "parquet_read_time",
+            "prefetch_wait_time", "rows_matched", "row_groups_processed",
+            "row_groups_skipped", "rg_bloom_pruned", "ffm_collector_calls",
+            "batches_produced", "init_prefetch_time", "coalesce_time",
+            "build_mask_time", "filter_record_batch_time", "parquet_poll_time",
+            "parquet_pending_count",
+        ];
+        let inner_parquet_keys: &[&str] = &[
+            "time_elapsed_opening", "time_elapsed_scanning_until_data",
+            "time_elapsed_scanning_total", "time_elapsed_processing",
+            "bytes_scanned", "page_index_rows_filtered",
+            "pushdown_rows_filtered", "metadata_load_time",
+            "bloom_filter_eval_time",
+        ];
+        let mut inner_time_sums: HashMap<&str, f64> = HashMap::new();
+        let mut inner_count_sums: HashMap<&str, usize> = HashMap::new();
+
+        for m in metrics.iter() {
+            let name = m.value().name();
+            if custom_keys.contains(&name) {
+                let raw = m.value().as_usize();
+                if raw > 0 {
+                    if name.contains("time") || name == "inter_poll_gap" {
+                        parts.push(format!("{}={:.3}ms", name, raw as f64 / 1_000_000.0));
+                    } else {
+                        parts.push(format!("{}={}", name, raw));
+                    }
+                }
+            } else if inner_parquet_keys.contains(&name) {
+                let raw = m.value().as_usize();
+                if name.contains("time") {
+                    *inner_time_sums.entry(name).or_insert(0.0) += raw as f64;
+                } else {
+                    *inner_count_sums.entry(name).or_insert(0) += raw;
+                }
+            }
+        }
+        for &key in inner_parquet_keys {
+            if let Some(&ns) = inner_time_sums.get(key) {
+                if ns > 0.0 {
+                    parts.push(format!("{}={:.3}ms", key, ns / 1_000_000.0));
+                }
+            }
+            if let Some(&v) = inner_count_sums.get(key) {
+                if v > 0 {
+                    parts.push(format!("{}={}", key, v));
+                }
+            }
+        }
+        if let (Some(&until_data), Some(&processing)) = (
+            inner_time_sums.get("time_elapsed_scanning_until_data"),
+            inner_time_sums.get("time_elapsed_processing"),
+        ) {
+            let io_wait = until_data - processing;
+            if io_wait > 0.0 {
+                parts.push(format!("io_wait={:.3}ms", io_wait / 1_000_000.0));
+            }
+        }
+        if parts.is_empty() {
+            "no metrics".to_string()
+        } else {
+            parts.join(" | ")
+        }
+    }
+
     pub fn with_session_context(
         stream: RecordBatchStreamAdapter<CrossRtStream>,
         query_context: QueryTrackingContext,
@@ -198,6 +295,9 @@ impl Drop for QueryStreamHandle {
                 .to_string();
             native_bridge_common::log_info!("[plan-metrics]\n{}", rendered);
         }
+
+        // Compact explain-analyze tree with aggregated inner parquet metrics.
+        self.dump_plan_metrics();
     }
 }
 
