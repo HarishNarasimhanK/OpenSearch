@@ -121,6 +121,9 @@ pub async fn execute_indexed_query(
                 )
                 .with_file_statistics_cache(
                     runtime.runtime_env.cache_manager.get_file_statistic_cache(),
+                )
+                .with_file_statistics_cache_limit(
+                    runtime.runtime_env.cache_manager.get_file_statistic_cache_limit(),
                 ),
         );
     if let Some(pool) = query_memory_pool {
