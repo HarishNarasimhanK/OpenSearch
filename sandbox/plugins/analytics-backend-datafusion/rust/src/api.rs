@@ -585,17 +585,35 @@ pub fn create_global_runtime(
     ));
 
     let (cache_manager_config, custom_cache_manager) = if cache_manager_ptr != 0 {
+        native_bridge_common::log_info!(
+            "[CACHE_LIFECYCLE] create_global_runtime: cache_manager_ptr is non-null, building config from CustomCacheManager"
+        );
         let mgr = unsafe { *Box::from_raw(cache_manager_ptr as *mut CustomCacheManager) };
         (mgr.build_cache_manager_config(), Some(mgr))
     } else {
+        native_bridge_common::log_info!(
+            "[CACHE_LIFECYCLE] create_global_runtime: cache_manager_ptr is null, using CacheManagerConfig::default() (20 MB stats limit)"
+        );
         (CacheManagerConfig::default(), None)
     };
+
+    native_bridge_common::log_info!(
+        "[CACHE_LIFECYCLE] create_global_runtime: about to build RuntimeEnv with cache config — stats_limit={} MB, metadata_limit={} MB",
+        cache_manager_config.file_statistics_cache_limit / (1024 * 1024),
+        cache_manager_config.metadata_cache_limit / (1024 * 1024)
+    );
 
     let runtime_env = RuntimeEnvBuilder::new()
         .with_memory_pool(memory_pool)
         .with_disk_manager_builder(disk_manager)
         .with_cache_manager(cache_manager_config)
         .build()?;
+
+    native_bridge_common::log_info!(
+        "[CACHE_LIFECYCLE] create_global_runtime: RuntimeEnv built. cache_manager stats_limit={} MB, metadata_limit={} MB",
+        runtime_env.cache_manager.get_file_statistic_cache_limit() / (1024 * 1024),
+        runtime_env.cache_manager.get_metadata_cache_limit() / (1024 * 1024)
+    );
 
     let runtime = DataFusionRuntime { runtime_env, custom_cache_manager, dynamic_limit_handle };
     Ok(Box::into_raw(Box::new(runtime)) as i64)

@@ -776,11 +776,23 @@ pub unsafe extern "C" fn df_create_cache(
     // Safety: cache_manager_ptr must be a valid pointer from df_create_custom_cache_manager
     let manager = &mut *(cache_manager_ptr as *mut CustomCacheManager);
 
+    native_bridge_common::log_info!(
+        "[CACHE_LIFECYCLE] df_create_cache called: type={}, size_limit={} bytes ({} MB), eviction={}",
+        cache_type,
+        size_limit,
+        size_limit / (1024 * 1024),
+        eviction_type
+    );
+
     match cache_type {
         cache::CACHE_TYPE_METADATA => {
             let inner_cache = DefaultFilesMetadataCache::new(size_limit as usize);
             let metadata_cache = Arc::new(cache::MutexFileMetadataCache::new(inner_cache));
             manager.set_file_metadata_cache(metadata_cache);
+            native_bridge_common::log_info!(
+                "[CACHE_LIFECYCLE] Metadata cache created: size_limit={} MB",
+                size_limit / (1024 * 1024)
+            );
         }
         cache::CACHE_TYPE_STATS => {
             let stats_cache = Arc::new(CustomStatisticsCache::new(
@@ -789,6 +801,10 @@ pub unsafe extern "C" fn df_create_cache(
                 0.8,
             ));
             manager.set_statistics_cache(stats_cache);
+            native_bridge_common::log_info!(
+                "[CACHE_LIFECYCLE] Statistics cache created: size_limit={} MB, eviction_threshold=0.8",
+                size_limit / (1024 * 1024)
+            );
         }
         _ => {
             return Err(format!(

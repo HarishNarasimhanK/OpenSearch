@@ -402,6 +402,12 @@ pub fn build_query_runtime_env(
     };
     list_file_cache.put(&table_scoped_path, CachedFileList::new(object_metas.to_vec()));
 
+    let stats_cache_limit = runtime.runtime_env.cache_manager.get_file_statistic_cache_limit();
+    log_debug!(
+        "[STATISTICS_CACHE] query_executor: building CacheManagerConfig, stats cache limit from runtime={} bytes ({} MB)",
+        stats_cache_limit,
+        stats_cache_limit / (1024 * 1024)
+    );
     let runtime_env = RuntimeEnvBuilder::from_runtime_env(&runtime.runtime_env)
         .with_cache_manager(
             CacheManagerConfig::default()
@@ -409,8 +415,14 @@ pub fn build_query_runtime_env(
                 .with_file_metadata_cache(Some(
                     runtime.runtime_env.cache_manager.get_file_metadata_cache(),
                 ))
+                .with_metadata_cache_limit(
+                    runtime.runtime_env.cache_manager.get_metadata_cache_limit(),
+                )
                 .with_file_statistics_cache(
                     runtime.runtime_env.cache_manager.get_file_statistic_cache(),
+                )
+                .with_file_statistics_cache_limit(
+                    runtime.runtime_env.cache_manager.get_file_statistic_cache_limit(),
                 ),
         )
         .build()?;

@@ -109,6 +109,12 @@ pub async fn execute_indexed_query(
     };
     list_file_cache.put(&table_scoped_path, CachedFileList::new(shard_view.object_metas.as_ref().clone()));
 
+    let stats_cache_limit = runtime.runtime_env.cache_manager.get_file_statistic_cache_limit();
+    log_debug!(
+        "[STATISTICS_CACHE] indexed_executor: building CacheManagerConfig, stats cache limit from runtime={} bytes ({} MB)",
+        stats_cache_limit,
+        stats_cache_limit / (1024 * 1024)
+    );
     let mut runtime_env_builder = RuntimeEnvBuilder::from_runtime_env(&runtime.runtime_env)
         .with_cache_manager(
             CacheManagerConfig::default()
@@ -121,6 +127,9 @@ pub async fn execute_indexed_query(
                 )
                 .with_file_statistics_cache(
                     runtime.runtime_env.cache_manager.get_file_statistic_cache(),
+                )
+                .with_file_statistics_cache_limit(
+                    runtime.runtime_env.cache_manager.get_file_statistic_cache_limit(),
                 ),
         );
     if let Some(pool) = query_memory_pool {

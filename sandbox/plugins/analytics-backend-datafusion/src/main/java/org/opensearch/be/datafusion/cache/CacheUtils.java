@@ -92,32 +92,39 @@ public final class CacheUtils {
      * @param clusterSettings OpenSearch cluster settings containing cache configuration
      */
     public static NativeCacheManagerHandle createCacheConfig(ClusterSettings clusterSettings) {
-        logger.info("Initializing cache configuration");
+        logger.info("[CACHE_LIFECYCLE] createCacheConfig: starting — creating native CustomCacheManager");
 
         long cacheManagerPtr = NativeBridge.createCustomCacheManager();
         NativeCacheManagerHandle handle = new NativeCacheManagerHandle(cacheManagerPtr);
+        logger.info("[CACHE_LIFECYCLE] createCacheConfig: native CustomCacheManager ptr={}", cacheManagerPtr);
 
         // Configure each enabled cache type
         for (CacheType type : CacheType.values()) {
             if (type.isEnabled(clusterSettings)) {
+                long sizeBytes = type.getSizeLimit(clusterSettings).getBytes();
+                String eviction = type.getEvictionType(clusterSettings);
                 logger.info(
-                    "Configuring {} cache: size={} bytes, eviction={}",
+                    "[CACHE_LIFECYCLE] createCacheConfig: {} cache ENABLED — calling NativeBridge.createCache(ptr={}, type={}, size={} bytes ({} MB), eviction={})",
                     type.getCacheTypeName(),
-                    type.getSizeLimit(clusterSettings).getBytes(),
-                    type.getEvictionType(clusterSettings)
+                    handle.getPointer(),
+                    type.cacheTypeName,
+                    sizeBytes,
+                    sizeBytes / (1024 * 1024),
+                    eviction
                 );
 
                 NativeBridge.createCache(
                     handle.getPointer(),
                     type.cacheTypeName,
-                    type.getSizeLimit(clusterSettings).getBytes(),
-                    type.getEvictionType(clusterSettings)
+                    sizeBytes,
+                    eviction
                 );
+                logger.info("[CACHE_LIFECYCLE] createCacheConfig: {} cache created successfully", type.getCacheTypeName());
             } else {
-                logger.debug("Cache type {} is disabled", type.getCacheTypeName());
+                logger.info("[CACHE_LIFECYCLE] createCacheConfig: {} cache DISABLED — skipping", type.getCacheTypeName());
             }
         }
-        logger.info("Cache configuration completed");
+        logger.info("[CACHE_LIFECYCLE] createCacheConfig: completed — all caches configured");
         return handle;
     }
 }

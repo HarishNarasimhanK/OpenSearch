@@ -93,16 +93,27 @@ public class DataFusionService extends AbstractLifecycleComponent {
         long cacheManagerPtr = 0L;
         NativeCacheManagerHandle cacheHandle = null;
         if (clusterSettings != null) {
+            logger.info("[CACHE_LIFECYCLE] Java: clusterSettings present, creating cache config. " +
+                "metadata_enabled={}, metadata_size={}, statistics_enabled={}, statistics_size={}",
+                CacheSettings.METADATA_CACHE_ENABLED.get(clusterSettings),
+                CacheSettings.METADATA_CACHE_SIZE_LIMIT.get(clusterSettings),
+                CacheSettings.STATISTICS_CACHE_ENABLED.get(clusterSettings),
+                CacheSettings.STATISTICS_CACHE_SIZE_LIMIT.get(clusterSettings));
             cacheHandle = CacheUtils.createCacheConfig(clusterSettings);
             cacheManagerPtr = cacheHandle.getPointer();
+            logger.info("[CACHE_LIFECYCLE] Java: cache config created, cacheManagerPtr={}", cacheManagerPtr);
+        } else {
+            logger.info("[CACHE_LIFECYCLE] Java: clusterSettings is null, no caches will be configured");
         }
 
         try {
+            logger.info("[CACHE_LIFECYCLE] Java: calling createGlobalRuntime with cacheManagerPtr={}", cacheManagerPtr);
             long ptr = NativeBridge.createGlobalRuntime(memoryPoolLimit, cacheManagerPtr, spillDirectory, spillMemoryLimit);
             if (cacheHandle != null) {
                 cacheHandle.markConsumed();
             }
             this.runtimeHandle = new NativeRuntimeHandle(ptr);
+            logger.info("[CACHE_LIFECYCLE] Java: global runtime created successfully, runtimePtr={}", ptr);
         } catch (Exception e) {
             if (cacheHandle != null) {
                 cacheHandle.close();
@@ -112,6 +123,7 @@ public class DataFusionService extends AbstractLifecycleComponent {
 
         if (clusterSettings != null) {
             this.cacheManager = new CacheManager(runtimeHandle);
+            logger.info("[CACHE_LIFECYCLE] Java: CacheManager initialized");
         }
 
         logger.debug("DataFusion service started — memory pool {}B, spill limit {}B", memoryPoolLimit, spillMemoryLimit);

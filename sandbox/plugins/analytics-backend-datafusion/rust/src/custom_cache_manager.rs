@@ -84,23 +84,51 @@ impl CustomCacheManager {
 
     /// Build a CacheManagerConfig from the caches stored in this CustomCacheManager
     pub fn build_cache_manager_config(&self) -> CacheManagerConfig {
+        native_bridge_common::log_info!("[CACHE_LIFECYCLE] build_cache_manager_config: starting");
         let mut config = CacheManagerConfig::default();
+        native_bridge_common::log_info!(
+            "[CACHE_LIFECYCLE] build_cache_manager_config: CacheManagerConfig::default() has file_statistics_cache_limit={} bytes ({} MB)",
+            config.file_statistics_cache_limit,
+            config.file_statistics_cache_limit / (1024 * 1024)
+        );
 
         // Add file metadata cache if available
         if let Some(cache) = self.get_file_metadata_cache_for_datafusion() {
+            let meta_limit = cache.cache_limit();
+            native_bridge_common::log_info!(
+                "[CACHE_LIFECYCLE] build_cache_manager_config: metadata cache present, limit={} bytes ({} MB)",
+                meta_limit,
+                meta_limit / (1024 * 1024)
+            );
             config = config.with_file_metadata_cache(Some(cache.clone()))
-                .with_metadata_cache_limit(cache.cache_limit());
+                .with_metadata_cache_limit(meta_limit);
+        } else {
+            native_bridge_common::log_info!("[CACHE_LIFECYCLE] build_cache_manager_config: no metadata cache set");
         }
 
         // Add statistics cache if available - use CustomStatisticsCache directly
         if let Some(stats_cache) = &self.statistics_cache {
-            config = config.with_file_statistics_cache(Some(stats_cache.clone() as Arc<dyn FileStatisticsCache>));
+            let limit = stats_cache.cache_limit();
+            native_bridge_common::log_info!(
+                "[CACHE_LIFECYCLE] build_cache_manager_config: statistics cache present, limit={} bytes ({} MB)",
+                limit,
+                limit / (1024 * 1024)
+            );
+            config = config.with_file_statistics_cache(Some(stats_cache.clone() as Arc<dyn FileStatisticsCache>))
+                .with_file_statistics_cache_limit(limit);
         } else {
-            // Default statistics cache if none set
+            native_bridge_common::log_info!(
+                "[CACHE_LIFECYCLE] build_cache_manager_config: no statistics cache — using DefaultFileStatisticsCache (20 MB)"
+            );
             let default_stats = Arc::new(DefaultFileStatisticsCache::default());
             config = config.with_file_statistics_cache(Some(default_stats));
         }
 
+        native_bridge_common::log_info!(
+            "[CACHE_LIFECYCLE] build_cache_manager_config: final config — metadata_limit={} MB, statistics_limit={} MB",
+            config.metadata_cache_limit / (1024 * 1024),
+            config.file_statistics_cache_limit / (1024 * 1024)
+        );
         config
     }
 
