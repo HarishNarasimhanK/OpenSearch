@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use native_bridge_common::log_debug;
+use native_bridge_common::{log_debug, log_info};
 use datafusion::{
     common::DataFusionError,
     datasource::listing::{ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl},
@@ -56,6 +56,7 @@ pub async fn execute_query(
     sort_fields: &[String],
     sort_orders: &[String],
 ) -> Result<i64, DataFusionError> {
+    log_info!("[QUERY_EXECUTOR] execute_query ENTER - table={}, num_files={}, strategy={:?}", table_name, object_metas.len(), query_config.query_strategy);
     // Build per-query RuntimeEnv with list-files cache pre-populated.
     let runtime_env = build_query_runtime_env(runtime, &table_path, object_metas.as_ref())?;
 
@@ -108,6 +109,7 @@ pub async fn execute_query(
     match query_config.query_strategy {
         QueryStrategy::ListingTable => {
             use crate::shard_table_provider::{ShardTableConfig, ShardTableProvider};
+            log_info!("[QUERY_EXECUTOR] QueryStrategy::ListingTable ENTER - table={}, num_files={}, using ShardTableProvider path (NO CachedMetadataReaderFactory)", table_name, object_metas.len());
 
             // Infer schema from the first file
             let file_format = ParquetFormat::new();
@@ -133,9 +135,11 @@ pub async fn execute_query(
             }));
             ctx.register_table(&table_name, provider)
                 .map_err(|e| { error!("Failed to register table: {}", e); e })?;
+            log_info!("[QUERY_EXECUTOR] QueryStrategy::ListingTable EXIT - table={}, registered ShardTableProvider successfully", table_name);
         }
         _ => {
             // Baseline: use standard ListingTable
+            log_info!("[QUERY_EXECUTOR] QueryStrategy::ListingTable(default) ENTER - table={}, num_files={}, using vanilla ListingTable (NO CachedMetadataReaderFactory, DataFusion default ParquetOpener will re-parse Thrift metadata on every file open)", table_name, object_metas.len());
             let file_format = ParquetFormat::new();
             let mut listing_options = ListingOptions::new(Arc::new(file_format))
                 .with_file_extension(".parquet")
@@ -158,6 +162,7 @@ pub async fn execute_query(
                 .map_err(|e| { error!("Failed to create listing table: {}", e); e })?);
             ctx.register_table(&table_name, provider)
                 .map_err(|e| { error!("Failed to register table: {}", e); e })?;
+            log_info!("[QUERY_EXECUTOR] QueryStrategy::ListingTable(default) EXIT - table={}, registered vanilla ListingTable successfully", table_name);
         }
     }
 
@@ -244,12 +249,14 @@ pub async fn execute_with_context(
     let token = crate::query_tracker::get_cancellation_token(context_id);
 
     let query_strategy = handle.query_config.query_strategy;
+    log_info!("[QUERY_EXECUTOR] execute_with_context ENTER - table={}, strategy={:?}, context_id={}", handle.table_name, query_strategy, context_id);
 
     // If ListingTable strategy: replace the default ListingTable with ShardTableProvider
     // that adds row_base partition column for ProjectRowIdOptimizer.
     // Also register the ProjectRowIdAnalyzer to ensure __row_id__ survives logical optimization.
     if query_strategy == QueryStrategy::ListingTable {
         use crate::shard_table_provider::{ShardTableConfig, ShardTableProvider};
+        log_info!("[QUERY_EXECUTOR] execute_with_context - using ShardTableProvider path (ListingTable strategy), table={}", handle.table_name);
 
         handle.ctx.deregister_table(&handle.table_name)?;
 
@@ -275,6 +282,9 @@ pub async fn execute_with_context(
             store_url,
         }));
         handle.ctx.register_table(&handle.table_name, provider)?;
+        log_info!("[QUERY_EXECUTOR] execute_with_context - ShardTableProvider registered, table={}", handle.table_name);
+    } else {
+        log_info!("[QUERY_EXECUTOR] execute_with_context - using vanilla ListingTable (NO CachedMetadataReaderFactory, DataFusion default will re-parse metadata), table={}, strategy={:?}", handle.table_name, query_strategy);
     }
 
     let query_future = async {
@@ -402,12 +412,6 @@ pub fn build_query_runtime_env(
     };
     list_file_cache.put(&table_scoped_path, CachedFileList::new(object_metas.to_vec()));
 
-    let stats_cache_limit = runtime.runtime_env.cache_manager.get_file_statistic_cache_limit();
-    log_debug!(
-        "[STATISTICS_CACHE] query_executor: building CacheManagerConfig, stats cache limit from runtime={} bytes ({} MB)",
-        stats_cache_limit,
-        stats_cache_limit / (1024 * 1024)
-    );
     let runtime_env = RuntimeEnvBuilder::from_runtime_env(&runtime.runtime_env)
         .with_cache_manager(
             CacheManagerConfig::default()
@@ -435,9 +439,11 @@ pub async fn build_shard_file_infos(
     store: &Arc<dyn object_store::ObjectStore>,
     object_metas: &[ObjectMeta],
 ) -> Result<Vec<ShardFileInfo>, DataFusionError> {
+    log_info!("[QUERY_EXECUTOR] build_shard_file_infos ENTER - num_files={}, BYPASSES metadata cache (reads parquet footer directly from object store for row counts)", object_metas.len());
     let mut files: Vec<ShardFileInfo> = Vec::new();
     let mut cumulative_rows: i64 = 0;
     for meta in object_metas {
+        log_info!("[QUERY_EXECUTOR] build_shard_file_infos - reading footer directly from file={}, size={} (NOT using FileMetadataCache)", meta.location, meta.size);
         let reader = datafusion::parquet::arrow::async_reader::ParquetObjectReader::new(
             Arc::clone(store), meta.location.clone(),
         ).with_file_size(meta.size);
@@ -460,6 +466,7 @@ pub async fn build_shard_file_infos(
         });
         cumulative_rows += num_rows;
     }
+    log_info!("[QUERY_EXECUTOR] build_shard_file_infos EXIT - num_files={}, total_rows={}", files.len(), cumulative_rows);
     Ok(files)
 }
 

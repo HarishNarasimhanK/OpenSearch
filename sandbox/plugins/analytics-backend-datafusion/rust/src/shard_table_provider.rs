@@ -25,6 +25,7 @@ use datafusion_datasource::file_groups::FileGroup;
 use datafusion_datasource::file_scan_config::FileScanConfigBuilder;
 use datafusion_datasource::table_schema::TableSchema;
 use datafusion_datasource::PartitionedFile;
+use native_bridge_common::log_info;
 
 pub use crate::api::ShardFileInfo;
 
@@ -75,6 +76,7 @@ impl TableProvider for ShardTableProvider {
         _filters: &[Expr],
         _limit: Option<usize>,
     ) -> Result<Arc<dyn ExecutionPlan>> {
+        log_info!("[SHARD_TABLE_PROVIDER] scan ENTER - num_files={}, NO CachedMetadataReaderFactory (uses DataFusion default ParquetOpener -> CachedParquetFileReader -> DFParquetMetadata::fetch_metadata which re-parses Thrift)", self.config.files.len());
         // Invariant: files are ordered by ascending row_base (build_shard_files contract).
         // ProjectRowIdOptimizer relies on the partition value matching the file's true offset.
         debug_assert!(
@@ -139,6 +141,7 @@ impl TableProvider for ShardTableProvider {
             .map_err(|e| datafusion::error::DataFusionError::Internal(format!("{}", e)))?;
 
         let file_scan_config = builder.build();
+        log_info!("[SHARD_TABLE_PROVIDER] scan EXIT - num_files={}, built DataSourceExec with default ParquetSource (NO custom ParquetFileReaderFactory - metadata will be re-parsed from Thrift on every file open)", self.config.files.len());
         Ok(DataSourceExec::from_data_source(file_scan_config))
     }
 

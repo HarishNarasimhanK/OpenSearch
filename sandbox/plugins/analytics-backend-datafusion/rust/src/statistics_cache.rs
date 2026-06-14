@@ -142,11 +142,6 @@ pub struct CustomStatisticsCache {
 impl CustomStatisticsCache {
     /// Create a new custom statistics cache
     pub fn new(policy_type: PolicyType, size_limit: usize, eviction_threshold: f64) -> Self {
-        native_bridge_common::log_info!(
-            "[STATISTICS_CACHE] Creating CustomStatisticsCache with size_limit={} bytes ({} MB)",
-            size_limit,
-            size_limit / (1024 * 1024)
-        );
         Self {
             inner_cache: DashMap::new(),
             policy: Arc::new(Mutex::new(create_policy(policy_type))),
@@ -355,16 +350,8 @@ impl CustomStatisticsCache {
             if let Ok(mut policy_guard) = self.policy.lock() {
                 policy_guard.on_access(&key, memory_size);
             }
-            native_bridge_common::log_debug!(
-                "[STATISTICS_CACHE] get HIT: path={}, entry_size={} bytes",
-                k, memory_size
-            );
         } else {
             self.miss_count.fetch_add(1, Ordering::Relaxed);
-            native_bridge_common::log_debug!(
-                "[STATISTICS_CACHE] get MISS: path={}",
-                k
-            );
         }
 
         result.map(|s| s.value().clone())
@@ -381,30 +368,14 @@ impl CustomStatisticsCache {
         let size_limit = self.size_limit.load(Ordering::Relaxed);
         let threshold = (size_limit as f64 * self.eviction_threshold) as usize;
 
-        native_bridge_common::log_debug!(
-            "[STATISTICS_CACHE] put: path={}, entry_size={} bytes, current_total={} bytes, size_limit={} bytes ({} MB), threshold={} bytes",
-            k, memory_size, current_size, size_limit, size_limit / (1024 * 1024), threshold
-        );
-
         let eviction_candidates = {
             if current_size + memory_size > threshold {
                 let target_eviction = (current_size + memory_size) - (size_limit as f64 * 0.6) as usize;
-                native_bridge_common::log_debug!(
-                    "[STATISTICS_CACHE] put: eviction triggered — need to free {} bytes (current+new={} > threshold={})",
-                    target_eviction, current_size + memory_size, threshold
-                );
                 if let Ok(policy_guard) = self.policy.lock() {
                     policy_guard.select_for_eviction(target_eviction)
                 } else { vec![] }
             } else { vec![] }
         };
-
-        if !eviction_candidates.is_empty() {
-            native_bridge_common::log_debug!(
-                "[STATISTICS_CACHE] put: evicting {} candidates",
-                eviction_candidates.len()
-            );
-        }
 
         for candidate_key in eviction_candidates {
             if let Ok(path) = self.parse_key_to_path(&candidate_key) {
@@ -420,10 +391,6 @@ impl CustomStatisticsCache {
             }
             state.tracker.insert(key.clone(), memory_size);
             state.total += memory_size;
-            native_bridge_common::log_debug!(
-                "[STATISTICS_CACHE] put: done — new_total={} bytes, entry_count={}",
-                state.total, state.tracker.len()
-            );
         }
 
         if let Ok(mut policy_guard) = self.policy.lock() {
@@ -514,14 +481,6 @@ impl FileStatisticsCache for CustomStatisticsCache {
     }
 
     fn update_cache_limit(&self, limit: usize) {
-        let current = self.size_limit.load(Ordering::Relaxed);
-        native_bridge_common::log_info!(
-            "[STATISTICS_CACHE] update_cache_limit called: current_limit={} bytes ({} MB), new_limit={} bytes ({} MB)",
-            current,
-            current / (1024 * 1024),
-            limit,
-            limit / (1024 * 1024)
-        );
         let _ = self.update_size_limit(limit);
     }
 

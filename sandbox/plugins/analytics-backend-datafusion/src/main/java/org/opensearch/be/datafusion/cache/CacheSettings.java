@@ -22,7 +22,7 @@ public class CacheSettings {
     public static final String STATISTICS_CACHE_SIZE_LIMIT_KEY = "datafusion.statistics.cache.size.limit";
     public static final Setting<ByteSizeValue> METADATA_CACHE_SIZE_LIMIT = new Setting<>(
         METADATA_CACHE_SIZE_LIMIT_KEY,
-        "250mb",
+        "500kb",
         (s) -> ByteSizeValue.parseBytesSizeValue(s, new ByteSizeValue(1000, ByteSizeUnit.KB), METADATA_CACHE_SIZE_LIMIT_KEY),
         Setting.Property.NodeScope,
         Setting.Property.Dynamic
@@ -30,7 +30,7 @@ public class CacheSettings {
 
     public static final Setting<ByteSizeValue> STATISTICS_CACHE_SIZE_LIMIT = new Setting<>(
         STATISTICS_CACHE_SIZE_LIMIT_KEY,
-        "100mb",
+        "200mb",
         (s) -> ByteSizeValue.parseBytesSizeValue(s, new ByteSizeValue(0, ByteSizeUnit.KB), STATISTICS_CACHE_SIZE_LIMIT_KEY),
         Setting.Property.NodeScope,
         Setting.Property.Dynamic

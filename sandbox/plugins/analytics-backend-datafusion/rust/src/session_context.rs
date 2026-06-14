@@ -156,12 +156,6 @@ pub async unsafe fn create_session_context(
         CachedFileList::new(shard_view.object_metas.as_ref().clone()),
     );
 
-    let stats_cache_limit = runtime.runtime_env.cache_manager.get_file_statistic_cache_limit();
-    log_debug!(
-        "[STATISTICS_CACHE] session_context: building CacheManagerConfig, stats cache limit from runtime={} bytes ({} MB)",
-        stats_cache_limit,
-        stats_cache_limit / (1024 * 1024)
-    );
     let mut runtime_env_builder = RuntimeEnvBuilder::from_runtime_env(&runtime.runtime_env)
         .with_cache_manager(
             CacheManagerConfig::default()
@@ -188,12 +182,6 @@ pub async unsafe fn create_session_context(
         error!("create_session_context: failed to build runtime env: {}", e);
         e
     })?;
-
-    log_debug!(
-        "[STATISTICS_CACHE] session_context: after RuntimeEnv build — stats_cache_limit={} MB, metadata_cache_limit={} MB",
-        runtime_env.cache_manager.get_file_statistic_cache_limit() / (1024 * 1024),
-        runtime_env.cache_manager.get_metadata_cache_limit() / (1024 * 1024)
-    );
 
     // Register shard-specific object store on file:// scheme for this query.
     // This is the instruction-based execution path (ShardScanInstructionHandler).

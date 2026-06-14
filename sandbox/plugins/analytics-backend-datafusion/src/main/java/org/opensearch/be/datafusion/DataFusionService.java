@@ -11,6 +11,7 @@ package org.opensearch.be.datafusion;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.opensearch.be.datafusion.cache.CacheManager;
+import org.opensearch.be.datafusion.cache.CacheSettings;
 import org.opensearch.be.datafusion.cache.CacheUtils;
 import org.opensearch.be.datafusion.cache.NativeCacheManagerHandle;
 import org.opensearch.be.datafusion.nativelib.NativeBridge;
@@ -95,10 +96,10 @@ public class DataFusionService extends AbstractLifecycleComponent {
         if (clusterSettings != null) {
             logger.info("[CACHE_LIFECYCLE] Java: clusterSettings present, creating cache config. " +
                 "metadata_enabled={}, metadata_size={}, statistics_enabled={}, statistics_size={}",
-                CacheSettings.METADATA_CACHE_ENABLED.get(clusterSettings),
-                CacheSettings.METADATA_CACHE_SIZE_LIMIT.get(clusterSettings),
-                CacheSettings.STATISTICS_CACHE_ENABLED.get(clusterSettings),
-                CacheSettings.STATISTICS_CACHE_SIZE_LIMIT.get(clusterSettings));
+                clusterSettings.get(CacheSettings.METADATA_CACHE_ENABLED),
+                clusterSettings.get(CacheSettings.METADATA_CACHE_SIZE_LIMIT),
+                clusterSettings.get(CacheSettings.STATISTICS_CACHE_ENABLED),
+                clusterSettings.get(CacheSettings.STATISTICS_CACHE_SIZE_LIMIT));
             cacheHandle = CacheUtils.createCacheConfig(clusterSettings);
             cacheManagerPtr = cacheHandle.getPointer();
             logger.info("[CACHE_LIFECYCLE] Java: cache config created, cacheManagerPtr={}", cacheManagerPtr);

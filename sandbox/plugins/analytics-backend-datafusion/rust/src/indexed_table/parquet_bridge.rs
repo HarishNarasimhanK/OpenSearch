@@ -43,6 +43,7 @@ use datafusion_datasource::source::DataSourceExec;
 use datafusion_datasource::PartitionedFile;
 use futures::future::BoxFuture;
 use futures::FutureExt;
+use native_bridge_common::log_info;
 use object_store::{ObjectStore, ObjectStoreExt};
 use prost::bytes::Bytes;
 
@@ -55,6 +56,7 @@ pub async fn load_parquet_metadata(
     location: &object_store::path::Path,
     metadata_cache: Arc<dyn FileMetadataCache>,
 ) -> std::result::Result<(SchemaRef, u64, Arc<ParquetMetaData>), String> {
+    log_info!("[PARQUET_BRIDGE] load_parquet_metadata ENTER - location={}", location);
     let meta = store
         .head(location)
         .await
@@ -71,6 +73,7 @@ pub async fn load_parquet_metadata(
     let schema = parquet_to_arrow_schema(file_meta.schema_descr(), file_meta.key_value_metadata())
         .map_err(|e| format!("parquet_to_arrow_schema {}: {}", location, e))?;
 
+    log_info!("[PARQUET_BRIDGE] load_parquet_metadata EXIT - location={}, size={}, num_row_groups={}", location, size, pq_meta.num_row_groups());
     Ok((Arc::new(schema), size, pq_meta))
 }
 
@@ -156,6 +159,7 @@ fn create_stream_with_access_plan(
     access_plan: ParquetAccessPlan,
     push_predicate: bool,
 ) -> Result<(SendableRecordBatchStream, Arc<dyn ExecutionPlan>)> {
+    log_info!("[PARQUET_BRIDGE] create_stream_with_access_plan ENTER - file={}, push_predicate={}, using CachedMetadataReaderFactory (pre-parsed metadata, no Thrift deserialization)", config.file_path, push_predicate);
     let partitioned_file = PartitionedFile::new(config.file_path.clone(), config.file_size)
         .with_extensions(Arc::new(access_plan));
 
@@ -194,6 +198,7 @@ fn create_stream_with_access_plan(
     let exec: Arc<dyn ExecutionPlan> = DataSourceExec::from_data_source(config_builder.build());
     let ctx = Arc::new(datafusion::execution::TaskContext::default());
     let stream = exec.execute(0, ctx)?;
+    log_info!("[PARQUET_BRIDGE] create_stream_with_access_plan EXIT - file={}, stream created successfully with CachedMetadataReaderFactory", config.file_path);
     Ok((stream, exec))
 }
 
@@ -293,7 +298,12 @@ impl AsyncFileReader for CachedMetadataReader {
         &mut self,
         _options: Option<&ArrowReaderOptions>,
     ) -> BoxFuture<'_, datafusion::parquet::errors::Result<Arc<ParquetMetaData>>> {
+        log_info!("[PARQUET_BRIDGE] CachedMetadataReader::get_metadata ENTER - location={}, returning pre-parsed Arc<ParquetMetaData> (zero deserialization cost)", self.location);
         let metadata = Arc::clone(&self.metadata);
-        async move { Ok(metadata) }.boxed()
+        let location = self.location.clone();
+        async move {
+            log_info!("[PARQUET_BRIDGE] CachedMetadataReader::get_metadata EXIT - location={}, num_row_groups={}", location, metadata.num_row_groups());
+            Ok(metadata)
+        }.boxed()
     }
 }

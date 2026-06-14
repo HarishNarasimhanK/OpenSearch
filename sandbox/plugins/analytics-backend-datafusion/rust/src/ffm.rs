@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use log::warn;
-use native_bridge_common::ffm_safe;
+use native_bridge_common::{ffm_safe, log_info};
 use parking_lot::RwLock;
 
 /// Only log block_on durations exceeding this threshold.
@@ -1111,6 +1111,7 @@ pub unsafe extern "C" fn df_execute_with_context(
     let query_strategy = session_handle.query_config.query_strategy;
     let use_indexed = session_handle.indexed_config.is_some()
         || (has_row_id && query_strategy != crate::datafusion_query_config::QueryStrategy::ListingTable);
+    log_info!("[FFM] df_execute_with_context - has_row_id={}, query_strategy={:?}, indexed_config={}, use_indexed={}", has_row_id, query_strategy, session_handle.indexed_config.is_some(), use_indexed);
     if use_indexed {
         // Extract target_partitions BEFORE boxing into raw pointer (session_handle is consumed).
         let partition_weight = session_handle.query_config.target_partitions.max(1) as u32;

@@ -15,6 +15,7 @@ use datafusion::execution::cache::cache_manager::{
 use datafusion::execution::cache::DefaultFilesMetadataCache;
 use datafusion::execution::cache::CacheAccessor;
 use log::error;
+use native_bridge_common::log_info;
 use object_store::path::Path;
 
 // Cache type constants
@@ -78,13 +79,16 @@ impl MutexFileMetadataCache {
 
 impl CacheAccessor<Path, CachedFileMetadataEntry> for MutexFileMetadataCache {
     fn get(&self, k: &Path) -> Option<CachedFileMetadataEntry> {
+        log_info!("[METADATA_CACHE] get ENTER - key={}", k);
         match self.inner.lock() {
             Ok(cache) => {
                 let result = cache.get(k);
                 if result.is_some() {
-                    self.hit_count.fetch_add(1, Ordering::Relaxed);
+                    let hits = self.hit_count.fetch_add(1, Ordering::Relaxed) + 1;
+                    log_info!("[METADATA_CACHE] get EXIT - key={}, result=HIT, total_hits={}, total_misses={}", k, hits, self.miss_count.load(Ordering::Relaxed));
                 } else {
-                    self.miss_count.fetch_add(1, Ordering::Relaxed);
+                    let misses = self.miss_count.fetch_add(1, Ordering::Relaxed) + 1;
+                    log_info!("[METADATA_CACHE] get EXIT - key={}, result=MISS, total_hits={}, total_misses={}", k, self.hit_count.load(Ordering::Relaxed), misses);
                 }
                 result
             }
@@ -96,8 +100,13 @@ impl CacheAccessor<Path, CachedFileMetadataEntry> for MutexFileMetadataCache {
     }
 
     fn put(&self, k: &Path, v: CachedFileMetadataEntry) -> Option<CachedFileMetadataEntry> {
+        log_info!("[METADATA_CACHE] put ENTER - key={}, stored_size={}, stored_last_modified={:?}", k, v.meta.size, v.meta.last_modified);
         match self.inner.lock() {
-            Ok(cache) => cache.put(k, v),
+            Ok(cache) => {
+                let result = cache.put(k, v);
+                log_info!("[METADATA_CACHE] put EXIT - key={}, replaced_existing={}", k, result.is_some());
+                result
+            }
             Err(e) => {
                 log_cache_error("put", &e.to_string());
                 None

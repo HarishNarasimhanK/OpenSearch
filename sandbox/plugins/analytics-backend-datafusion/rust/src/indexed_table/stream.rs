@@ -33,7 +33,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use native_bridge_common::log_debug;
+use native_bridge_common::{log_debug, log_info};
 use datafusion::arrow::array::{Array, BooleanArray, UInt64Array};
 use datafusion::arrow::compute::filter_record_batch;
 use datafusion::arrow::datatypes::{DataType, Field, Schema, SchemaRef};
@@ -624,12 +624,15 @@ impl IndexedStream {
         selection: RowSelection,
         push_predicate: bool,
     ) -> Result<(SendableRecordBatchStream, Arc<dyn ExecutionPlan>)> {
-        parquet_bridge::create_row_selection_stream(
+        log_info!("[INDEXED_STREAM] create_row_selection_stream ENTER - file={}, rg_index={}, push_predicate={}, using INDEXED path (CachedMetadataReaderFactory)", self.object_path, rg.index, push_predicate);
+        let result = parquet_bridge::create_row_selection_stream(
             &self.bridge_config(),
             rg.index,
             selection,
             push_predicate,
-        )
+        );
+        log_info!("[INDEXED_STREAM] create_row_selection_stream EXIT - file={}, rg_index={}, success={}", self.object_path, rg.index, result.is_ok());
+        result
     }
 
     /// Take one parquet-delivered batch, apply candidate + refinement

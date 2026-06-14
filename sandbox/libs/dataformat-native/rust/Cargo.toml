@@ -81,6 +81,40 @@ opensearch-repository-gcs = { path = "../../../plugins/native-repository-gcs/src
 opensearch-repository-azure = { path = "../../../plugins/native-repository-azure/src/main/rust" }
 opensearch-repository-fs = { path = "../../../plugins/native-repository-fs/src/main/rust" }
 
+[patch.crates-io]
+datafusion = { path = "/Volumes/workplace/opensearch-cache-port/datafusion/datafusion/core" }
+datafusion-catalog = { path = "/Volumes/workplace/opensearch-cache-port/datafusion/datafusion/catalog" }
+datafusion-catalog-listing = { path = "/Volumes/workplace/opensearch-cache-port/datafusion/datafusion/catalog-listing" }
+datafusion-common = { path = "/Volumes/workplace/opensearch-cache-port/datafusion/datafusion/common" }
+datafusion-common-runtime = { path = "/Volumes/workplace/opensearch-cache-port/datafusion/datafusion/common-runtime" }
+datafusion-datasource = { path = "/Volumes/workplace/opensearch-cache-port/datafusion/datafusion/datasource" }
+datafusion-datasource-arrow = { path = "/Volumes/workplace/opensearch-cache-port/datafusion/datafusion/datasource-arrow" }
+datafusion-datasource-csv = { path = "/Volumes/workplace/opensearch-cache-port/datafusion/datafusion/datasource-csv" }
+datafusion-datasource-json = { path = "/Volumes/workplace/opensearch-cache-port/datafusion/datafusion/datasource-json" }
+datafusion-datasource-parquet = { path = "/Volumes/workplace/opensearch-cache-port/datafusion/datafusion/datasource-parquet" }
+datafusion-doc = { path = "/Volumes/workplace/opensearch-cache-port/datafusion/datafusion/doc" }
+datafusion-execution = { path = "/Volumes/workplace/opensearch-cache-port/datafusion/datafusion/execution" }
+datafusion-expr = { path = "/Volumes/workplace/opensearch-cache-port/datafusion/datafusion/expr" }
+datafusion-expr-common = { path = "/Volumes/workplace/opensearch-cache-port/datafusion/datafusion/expr-common" }
+datafusion-functions = { path = "/Volumes/workplace/opensearch-cache-port/datafusion/datafusion/functions" }
+datafusion-functions-aggregate = { path = "/Volumes/workplace/opensearch-cache-port/datafusion/datafusion/functions-aggregate" }
+datafusion-functions-aggregate-common = { path = "/Volumes/workplace/opensearch-cache-port/datafusion/datafusion/functions-aggregate-common" }
+datafusion-functions-nested = { path = "/Volumes/workplace/opensearch-cache-port/datafusion/datafusion/functions-nested" }
+datafusion-functions-table = { path = "/Volumes/workplace/opensearch-cache-port/datafusion/datafusion/functions-table" }
+datafusion-functions-window = { path = "/Volumes/workplace/opensearch-cache-port/datafusion/datafusion/functions-window" }
+datafusion-functions-window-common = { path = "/Volumes/workplace/opensearch-cache-port/datafusion/datafusion/functions-window-common" }
+datafusion-macros = { path = "/Volumes/workplace/opensearch-cache-port/datafusion/datafusion/macros" }
+datafusion-optimizer = { path = "/Volumes/workplace/opensearch-cache-port/datafusion/datafusion/optimizer" }
+datafusion-physical-expr = { path = "/Volumes/workplace/opensearch-cache-port/datafusion/datafusion/physical-expr" }
+datafusion-physical-expr-adapter = { path = "/Volumes/workplace/opensearch-cache-port/datafusion/datafusion/physical-expr-adapter" }
+datafusion-physical-expr-common = { path = "/Volumes/workplace/opensearch-cache-port/datafusion/datafusion/physical-expr-common" }
+datafusion-physical-optimizer = { path = "/Volumes/workplace/opensearch-cache-port/datafusion/datafusion/physical-optimizer" }
+datafusion-physical-plan = { path = "/Volumes/workplace/opensearch-cache-port/datafusion/datafusion/physical-plan" }
+datafusion-pruning = { path = "/Volumes/workplace/opensearch-cache-port/datafusion/datafusion/pruning" }
+datafusion-session = { path = "/Volumes/workplace/opensearch-cache-port/datafusion/datafusion/session" }
+datafusion-sql = { path = "/Volumes/workplace/opensearch-cache-port/datafusion/datafusion/sql" }
+datafusion-substrait = { path = "/Volumes/workplace/opensearch-cache-port/datafusion/datafusion/substrait" }
+
 [profile.release]
 lto = false
 codegen-units = 4
